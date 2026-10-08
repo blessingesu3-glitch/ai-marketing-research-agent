@@ -7,10 +7,6 @@ from pydantic import BaseModel
 from app import app as research_graph
 
 
-# ---------------------------------
-# API setup
-# ---------------------------------
-
 api = FastAPI(
     title="AI Marketing Research Agent",
     description="A LangGraph-powered marketing research API.",
@@ -18,31 +14,21 @@ api = FastAPI(
 )
 
 
-# ---------------------------------
-# Allow the frontend to communicate
-# with the backend
-# ---------------------------------
-
 api.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=[
+        "http://localhost:3000",
+        "https://ai-marketing-research-agent.vercel.app",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
-# ---------------------------------
-# Request model
-# ---------------------------------
-
 class ResearchRequest(BaseModel):
     question: str
 
-
-# ---------------------------------
-# Response model
-# ---------------------------------
 
 class ResearchReportResponse(BaseModel):
     question: str
@@ -53,10 +39,6 @@ class ResearchReportResponse(BaseModel):
     sources: List[str]
 
 
-# ---------------------------------
-# Health check
-# ---------------------------------
-
 @api.get("/")
 def health_check():
     return {
@@ -64,10 +46,6 @@ def health_check():
         "agent": "AI Marketing Research Agent",
     }
 
-
-# ---------------------------------
-# Research endpoint
-# ---------------------------------
 
 @api.post("/research", response_model=ResearchReportResponse)
 def run_research(request: ResearchRequest):
