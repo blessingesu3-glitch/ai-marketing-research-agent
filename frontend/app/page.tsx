@@ -22,6 +22,10 @@ export default function Home() {
   const [error, setError] = useState("");
 
   async function handleResearch() {
+    if (loading) {
+      return;
+    }
+
     if (!question.trim()) {
       setError("Please enter a research question.");
       return;

@@ -1,0 +1,66 @@
+{
+  "_synthetic": true,
+  "_note": "SYNTHETIC TEST DATA. Invented for offline tests only. These are NOT real market research results, businesses, prices or statistics. Domains use the reserved .example / .test TLDs or are clearly fictional.",
+  "local_bookings": {
+    "query": "salon booking problems Lagos Nigeria",
+    "results": [
+      {
+        "title": "Survey of Lagos salon owners on WhatsApp bookings (synthetic)",
+        "url": "https://lagos-salon-survey.example/report?utm_source=newsletter",
+        "content": "In a survey of 40 Lagos salon owners, 28 said they take most bookings through WhatsApp messages and 19 said missed messages lead to lost appointments in Nigeria.",
+        "score": 0.91,
+        "raw_content": null
+      },
+      {
+        "title": "Car dealership inventory tips (synthetic, irrelevant)",
+        "url": "https://cars.example/inventory-tips",
+        "content": "Dealerships should rotate vehicle inventory every quarter and track test-drive conversion.",
+        "score": 0.22,
+        "raw_content": null
+      }
+    ]
+  },
+  "competitors": {
+    "query": "WhatsApp chatbot providers Nigeria pricing",
+    "results": [
+      {
+        "title": "ChatFlowX - WhatsApp automation for Nigerian businesses (synthetic vendor)",
+        "url": "https://chatflowx.example/features",
+        "content": "ChatFlowX offers WhatsApp chatbots, automated booking reminders and broadcast messages for Nigerian businesses. Our customers capture 3x more leads.",
+        "score": 0.85,
+        "raw_content": null
+      },
+      {
+        "title": "ChatFlowX - WhatsApp automation (duplicate URL, synthetic)",
+        "url": "https://www.chatflowx.example/features/",
+        "content": "Duplicate of the ChatFlowX features page.",
+        "score": 0.80,
+        "raw_content": null
+      }
+    ]
+  },
+  "international": {
+    "query": "chatbot impact on bookings small business",
+    "results": [
+      {
+        "title": "US small business chatbot study (synthetic)",
+        "url": "https://us-smb-study.example/chatbots",
+        "content": "A study of 500 small businesses in the United States found chatbots reduced missed booking enquiries by 35 percent.",
+        "score": 0.77,
+        "raw_content": null
+      }
+    ]
+  },
+  "with_price": {
+    "query": "BotPal pricing",
+    "results": [
+      {
+        "title": "BotPal pricing (synthetic vendor)",
+        "url": "https://botpal.example/pricing",
+        "content": "BotPal WhatsApp booking assistant Starter plan costs ₦25,000 per month for one business line in Nigeria.",
+        "score": 0.88,
+        "raw_content": null
+      }
+    ]
+  }
+}
