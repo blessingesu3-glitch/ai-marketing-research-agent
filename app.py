@@ -633,6 +633,44 @@ def location_level(source: Dict[str, Any], levels: List[Tuple[str, List[str]]]) 
     return None
 
 
+def matched_levels(source: Dict[str, Any], levels: List[Tuple[str, List[str]]]) -> set:
+    """All location levels a source mentions (by text or country web domain)."""
+    haystack = (source_text(source) + " " + source.get("url", "")).lower()
+    host = _host(source.get("url", ""))
+    found = set()
+    for index, (_name, terms) in enumerate(levels):
+        for term in terms:
+            tld = _COUNTRY_TLDS.get(term)
+            if term in haystack or (tld and host.endswith(tld)):
+                found.add(index)
+    return found
+
+
+def claim_location_level(
+    claim_text_value: str, cited: List[Dict[str, Any]], levels: List[Tuple[str, List[str]]]
+) -> Optional[int]:
+    """How specific the evidence for THIS claim is.
+
+    For a city-level question (e.g. 'Abuja, Nigeria') the claim only counts as
+    city evidence when the claim itself is about the city AND a cited source
+    mentions it. A country-wide article that merely mentions the city somewhere
+    counts as country-wide evidence.
+    """
+    if not levels or not cited:
+        return None
+    per_source = [matched_levels(s, levels) for s in cited]
+    if not any(per_source):
+        return None
+    if len(levels) == 1:
+        return 0
+    claim_lower = claim_text_value.lower()
+    claim_is_local = any(term in claim_lower for term in levels[0][1])
+    if claim_is_local and any(0 in m for m in per_source):
+        return 0
+    wider = [lvl for m in per_source for lvl in m if lvl >= 1]
+    return min(wider) if wider else 1   # a source naming the city is at least country-level
+
+
 # Kept for backwards compatibility with earlier callers/tests.
 def mentions_location(source: Dict[str, Any], terms: List[str]) -> bool:
     levels = [(t, [t]) for t in terms]
@@ -707,10 +745,7 @@ def check_claim(
     elif kind == "evidence" and all(is_vendor(s, claim.text, assessments) for s in cited):
         kind, status = "vendor_claim", "downgraded"
 
-    best = None
-    if levels and cited:
-        found = [lvl for lvl in (location_level(s, levels) for s in cited) if lvl is not None]
-        best = min(found) if found else None
+    best = claim_location_level(claim.text, cited, levels)
     suffix = _location_suffix(best, levels)
 
     if kind == "inference":
@@ -870,13 +905,46 @@ def validate_and_render(
     for item in analysis.aspect_coverage:
         coverage.setdefault(_norm_aspect(item.aspect), set()).update(item.answering_findings)
 
+    small_words = {"in", "of", "for", "the", "and", "a", "an", "to", "on", "with", "by", "at"}
+    place_words = {w for _name, terms in levels for term in terms for w in term.split()}
+
+    def key_words(text: str) -> set:
+        return {
+            w[:-1] if len(w) > 3 and w.endswith("s") else w
+            for w in text.split() if w not in small_words and w not in place_words
+        }
+
+    def coverage_for(key: str) -> Optional[set]:
+        """Analyst's answer for this aspect, matching reworded names
+        ('competitors' = 'Competitors in Abuja' = 'competitor')."""
+        if key in coverage:
+            return coverage[key]
+        words = key_words(key)
+        for other, numbers in coverage.items():
+            other_words = key_words(other)
+            if words and other_words and (words <= other_words or other_words <= words):
+                return numbers
+        return None
+
     for aspect in dict.fromkeys(planned_aspects or []):
         key = _norm_aspect(aspect)
         if not key or key == "general":
             continue
-        answered = {n for n in coverage.get(key, set()) if n in sourced}
+        listed = coverage_for(key)
+        if listed is not None:
+            # The analyst said which findings answer it: trust only those that survived checks.
+            answered = {n for n in listed if n in sourced}
+        else:
+            # The analyst skipped it: count sourced findings whose source came from this search.
+            answered = {
+                n for n, c in sourced.items()
+                if any(_norm_aspect(s.get("aspect", "")) == key for s in c["sources"])
+            }
         if answered:
             continue
+        aspect_words = set(key.split())
+        if any(aspect_words <= set(_norm_aspect(u).split()) for u in unknowns):
+            continue  # the analyst already reported this gap
         if key in failed:
             unknowns.append(f"Not researched: the search for '{aspect}' failed.")
         else:
