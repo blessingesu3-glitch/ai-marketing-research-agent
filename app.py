@@ -1,6 +1,7 @@
 import os
 import re
 import sys
+import warnings
 from typing import Any, Dict, List, Literal, Optional, Tuple, TypedDict
 from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
 
@@ -12,6 +13,9 @@ from langchain_tavily import TavilySearch
 from langgraph.graph import END, START, StateGraph
 
 load_dotenv()
+
+# langchain-openai structured output triggers a harmless pydantic serializer warning.
+warnings.filterwarnings("ignore", message="Pydantic serializer warnings")
 
 
 # =====================================================================
@@ -114,6 +118,15 @@ class SourceAssessment(BaseModel):
     source_type: SourceType
 
 
+class AspectCoverage(BaseModel):
+    aspect: str = Field(description="One planned research aspect, copied exactly.")
+    answering_findings: List[int] = Field(
+        default_factory=list,
+        description="1-based numbers of the key findings that directly answer this aspect. "
+        "Empty if no finding answers it.",
+    )
+
+
 class AnalysisOutput(BaseModel):
     summary: str = Field(
         description="3-5 sentences. Only state what the findings support."
@@ -126,6 +139,7 @@ class AnalysisOutput(BaseModel):
         description="Parts of the question the sources could not answer.",
     )
     source_assessments: List[SourceAssessment] = Field(default_factory=list)
+    aspect_coverage: List[AspectCoverage] = Field(default_factory=list)
 
 
 # =====================================================================
@@ -252,10 +266,18 @@ Question:
 
 Split the question into its distinct parts (for example: market or demand
 evidence, customer problems, competitors and what they offer, published prices,
-channels, trends). Create ONE short search query per part the question actually
-asks about, up to {MAX_SEARCHES} queries. Do not repeat the same search in
-different words. Put the location and sector in each query when the question
-names them. For prices, search for the providers' own pricing pages.
+customer segments, channels, trends). Create ONE short search query per part the
+question actually asks about, up to {MAX_SEARCHES} queries. Do not repeat the
+same search in different words.
+
+Write each query the way the pages you want are worded, not the way the
+question is worded. Examples of the style (adapt to the actual sector/place):
+- providers:      "<service> provider <country>" / "<service> company <city>"
+- prices:         "<service> pricing <country> per month" / "<service> price list <currency>"
+- local market:   "<business type> <city> book appointment" / "<business type> <city> reviews"
+- customer needs: "<business type> owners complain <problem>" / "<problem> <business type> <country>"
+Avoid abstract phrases like "opportunities for" or "customer segments for".
+Put the location in each query when the question names one.
 """
     try:
         plan = planner.invoke([HumanMessage(content=prompt)])
@@ -398,6 +420,10 @@ def analyze(state: ResearchState):
             f"- {f['aspect']}: {f['query']}" for f in state["failed_queries"]
         )
 
+    aspect_list = "\n".join(
+        f"  - {a}" for a in dict.fromkeys(t["aspect"] for t in plan.get("tasks", []))
+    ) or "  - (none)"
+
     prompt = f"""You are a marketing research analyst. Answer the question using ONLY
 the numbered sources below.
 
@@ -418,13 +444,26 @@ How to answer:
 - If a part of the question is not answered by the sources, add it to 'unknowns'
   (for example: "No published prices were found for <company>").
 - Opportunities may be inferences, but must say what they are based on.
+- A price claim covers ONE provider and cites only the page that shows that price.
+- A company's own website, blog or social post about its product is 'company_or_vendor_page'.
 - Recommendations must list the finding numbers they rely on.
 - Assess every source: is it relevant, and what type is it.
+- For each planned aspect below, list the finding numbers that directly answer it
+  (empty if none):
+{aspect_list}
+- The summary may only restate findings. Do not add figures that are not in a finding.
 - Fewer, well-supported findings are better than many weak ones. Empty lists are allowed.
 """
 
     analysis = analyst.invoke([HumanMessage(content=prompt)])
-    report = validate_and_render(analysis, sources, question, plan.get("target_location"))
+    report = validate_and_render(
+        analysis,
+        sources,
+        question,
+        plan.get("target_location"),
+        planned_aspects=[t["aspect"] for t in plan.get("tasks", [])],
+        failed_aspects=[f["aspect"] for f in state.get("failed_queries") or []],
+    )
     return {"report": report}
 
 
@@ -452,6 +491,18 @@ _COUNTRY_TLDS = {
     "australia": ".au", "egypt": ".eg", "rwanda": ".rw", "uganda": ".ug",
 }
 
+# Social platforms and forums: useful signals, but anecdotal and often self-promotion.
+_SOCIAL_HOSTS = (
+    "linkedin.com", "youtube.com", "youtu.be", "facebook.com", "fb.com",
+    "instagram.com", "tiktok.com", "x.com", "twitter.com", "threads.net",
+    "nairaland.com", "reddit.com", "quora.com", "pinterest.com",
+)
+# URL paths that are almost always a company describing its own product.
+_VENDOR_PATH = re.compile(
+    r"/(services?|pricing|prices|plans|features|products?|solutions|demo|book-a-demo)(/|\.|-|$)", re.I
+)
+_SECOND_LEVEL = {"co", "com", "org", "net", "gov", "edu", "ac", "ltd", "plc"}
+
 
 def _numbers(text: str) -> List[str]:
     out = []
@@ -464,25 +515,64 @@ def _tokens(text: str) -> set:
     return {w for w in re.findall(r"[a-z][a-z0-9'-]{2,}", (text or "").lower()) if w not in _STOPWORDS}
 
 
-def _location_terms(target_location: Optional[str]) -> List[str]:
+def _host(url: str) -> str:
+    return urlsplit(url or "").netloc.lower().split(":")[0].removeprefix("www.")
+
+
+def _host_label(url: str) -> str:
+    """'musskart.com' -> 'musskart'; 'shop.brand.com.ng' -> 'brand'."""
+    parts = _host(url).split(".")
+    if len(parts) >= 3 and parts[-2] in _SECOND_LEVEL:
+        return parts[-3]
+    return parts[-2] if len(parts) >= 2 else parts[0]
+
+
+def is_social(source: Dict[str, Any]) -> bool:
+    host = _host(source.get("url", ""))
+    return any(host == h or host.endswith("." + h) for h in _SOCIAL_HOSTS)
+
+
+def is_vendor(source: Dict[str, Any], claim_text: str, assessments: Dict[str, "SourceAssessment"]) -> bool:
+    a = assessments.get(source["id"])
+    if a is not None and a.source_type == "company_or_vendor_page":
+        return True
+    if _VENDOR_PATH.search(urlsplit(source.get("url", "")).path):
+        return True
+    label = _host_label(source.get("url", ""))
+    # The claim names the company whose own website is being cited.
+    return len(label) >= 4 and label in re.sub(r"[^a-z0-9]", "", claim_text.lower())
+
+
+def _location_levels(target_location: Optional[str]) -> List[Tuple[str, List[str]]]:
+    """'Abuja, Nigeria' -> [('Abuja', ['abuja']), ('Nigeria', ['nigeria'])], most specific first."""
     if not target_location:
         return []
-    parts = re.split(r"[,/]| and ", target_location.lower())
-    return [p.strip() for p in parts if len(p.strip()) >= 3]
+    levels = []
+    for part in re.split(r",|/|\band\b", target_location):
+        name = part.strip()
+        if len(name) >= 2:
+            levels.append((name, [name.lower()]))
+    return levels
 
 
-def mentions_location(source: Dict[str, Any], terms: List[str]) -> bool:
-    if not terms:
-        return True
+def location_level(source: Dict[str, Any], levels: List[Tuple[str, List[str]]]) -> Optional[int]:
+    """Index of the most specific location level the source mentions, or None."""
     haystack = (source_text(source) + " " + source.get("url", "")).lower()
-    host = urlsplit(source.get("url", "")).netloc.lower()
-    for term in terms:
-        if term in haystack:
-            return True
-        tld = _COUNTRY_TLDS.get(term)
-        if tld and (host.endswith(tld) or tld + "/" in host):
-            return True
-    return False
+    host = _host(source.get("url", ""))
+    for index, (_name, terms) in enumerate(levels):
+        for term in terms:
+            if term in haystack:
+                return index
+            tld = _COUNTRY_TLDS.get(term)
+            if tld and host.endswith(tld):
+                return index
+    return None
+
+
+# Kept for backwards compatibility with earlier callers/tests.
+def mentions_location(source: Dict[str, Any], terms: List[str]) -> bool:
+    levels = [(t, [t]) for t in terms]
+    return not terms or location_level(source, levels) is not None
 
 
 def _supports(claim_text: str, source: Dict[str, Any]) -> bool:
@@ -491,78 +581,93 @@ def _supports(claim_text: str, source: Dict[str, Any]) -> bool:
     return len(shared) >= 2
 
 
-def _figures_found(claim_text: str, sources: List[Dict[str, Any]]) -> bool:
-    figures = _numbers(claim_text)
-    if not figures:
-        return True
-    pool = " ".join(source_text(s) for s in sources)
-    pool_numbers = set(_numbers(pool))
-    return all(f in pool_numbers for f in figures)
+def _figures_in(figures: List[str], sources: List[Dict[str, Any]]) -> bool:
+    pool = set(_numbers(" ".join(source_text(s) for s in sources)))
+    return all(f in pool for f in figures)
 
 
-def _host(url: str) -> str:
-    return urlsplit(url).netloc.lower().removeprefix("www.")
+def _location_suffix(best: Optional[int], levels: List[Tuple[str, List[str]]]) -> str:
+    if not levels or best == 0:
+        return ""
+    if best is None:
+        return " – not specific to target location"
+    return f" – {levels[best][0]}-wide, not {levels[0][0]}-specific"
 
 
 def check_claim(
     claim: Claim,
     sources_by_id: Dict[str, Dict[str, Any]],
     assessments: Dict[str, SourceAssessment],
-    location_terms: List[str],
+    levels: List[Tuple[str, List[str]]],
 ) -> Dict[str, Any]:
-    """Return a checked claim: {'text','label','sources','status'}.
+    """Return a checked claim.
 
-    status: 'ok' | 'downgraded' | 'rejected_figure'
+    status:   'ok' | 'downgraded' | 'rejected_figure' | 'rejected_price_mix'
+    strength: 'strong' (target-location evidence) | 'medium' (wider-area evidence)
+              | 'weak' (vendor, social, other region, or no source)
     """
-    notes = []
     cited = []
     for sid in dict.fromkeys(s.strip().upper() for s in claim.source_ids):
         src = sources_by_id.get(sid)
         if src is None:
-            notes.append(f"{sid} not retrieved")
-            continue
+            continue                                   # not retrieved
         a = assessments.get(sid)
         if a is not None and not a.relevant:
-            notes.append(f"{sid} irrelevant")
-            continue
+            continue                                   # marked irrelevant
         if not _supports(claim.text, src):
-            notes.append(f"{sid} does not mention this")
-            continue
+            continue                                   # does not mention the claim
         cited.append(src)
 
+    base = {"text": claim.text, "sources": [], "strength": "weak"}
+    figures = _numbers(claim.text)
+
+    # Prices must be attributable to one provider's source.
+    if _CURRENCY.search(claim.text) and len(cited) > 1:
+        return {**base, "label": "Not established", "status": "rejected_price_mix"}
+    # Every figure must appear in the cited source text.
+    if figures and not _figures_in(figures, cited):
+        return {**base, "label": "Not established", "status": "rejected_figure"}
+
     kind = claim.kind
-    scope = claim.scope
     status = "ok"
-
-    # Numbers must appear in the cited sources, otherwise the claim is not shown as fact.
-    if _numbers(claim.text) and not _figures_found(claim.text, cited):
-        return {"text": claim.text, "label": "Not established", "sources": [], "status": "rejected_figure"}
-
     if not cited:
         if kind != "inference":
             status = "downgraded"
         kind = "inference"
-    else:
-        types = {
-            assessments[s["id"]].source_type for s in cited if s["id"] in assessments
-        }
-        if kind == "evidence" and types and types <= {"company_or_vendor_page"}:
-            kind, status = "vendor_claim", "downgraded"
+    elif all(is_social(s) for s in cited):
+        if kind != "inference":
+            kind, status = "social", "downgraded"
+    elif kind == "evidence" and all(is_vendor(s, claim.text, assessments) for s in cited):
+        kind, status = "vendor_claim", "downgraded"
 
-    if scope == "target_location" and location_terms:
-        if not cited or not any(mentions_location(s, location_terms) for s in cited):
-            scope, status = "other_or_unspecified", "downgraded"
+    best = None
+    if levels and cited:
+        found = [lvl for lvl in (location_level(s, levels) for s in cited) if lvl is not None]
+        best = min(found) if found else None
+    suffix = _location_suffix(best, levels)
 
     if kind == "inference":
-        label = "Inference"
+        label, strength = "Inference", "weak"
+    elif kind == "social":
+        label, strength = "Social post" + suffix, "weak"
     elif kind == "vendor_claim":
-        label = "Vendor claim"
-    elif scope == "target_location" or not location_terms:
-        label = "Evidence"
+        label, strength = "Vendor claim" + suffix, "weak"
     else:
-        label = "Evidence – not specific to target location"
+        label = "Evidence" + suffix
+        if not levels or best == 0:
+            strength = "strong"
+        elif best is not None:
+            strength = "medium"
+        else:
+            strength = "weak"
+        if suffix:
+            status = "downgraded" if claim.scope == "target_location" else status
 
-    return {"text": claim.text, "label": label, "sources": cited, "status": status, "notes": notes}
+    return {**base, "label": label, "sources": cited, "status": status, "strength": strength}
+
+
+def _is_sourced(checked: Dict[str, Any]) -> bool:
+    return bool(checked["sources"]) and not checked["status"].startswith("rejected")
 
 
 def _render_claim(checked: Dict[str, Any]) -> str:
@@ -571,6 +676,11 @@ def _render_claim(checked: Dict[str, Any]) -> str:
             f"[Not established] {checked['text']} — this figure was not found in "
             "the cited sources, so it is not presented as fact."
         )
+    if checked["status"] == "rejected_price_mix":
+        return (
+            f"[Not established] {checked['text']} — this price combines several sources, "
+            "so it cannot be attributed to one provider."
+        )
     line = f"[{checked['label']}] {checked['text']}"
     if checked["sources"]:
         refs = "; ".join(f"{s['id']} {s['url']}" for s in checked["sources"])
@@ -578,14 +688,18 @@ def _render_claim(checked: Dict[str, Any]) -> str:
     return line
 
 
-def _clean_summary(summary: str, sources: List[Dict[str, Any]], question: str) -> str:
-    """Drop summary sentences containing figures found in neither the sources nor the question."""
-    allowed = set(_numbers(" ".join(source_text(s) for s in sources) + " " + question))
+def _clean_summary(summary: str, verified_text: str, question: str) -> str:
+    """Keep only summary sentences whose figures appear in a verified finding or the question."""
+    allowed = set(_numbers(verified_text + " " + question))
     kept = []
     for sentence in re.split(r"(?<=[.!?])\s+", (summary or "").strip()):
-        if all(n in allowed for n in _numbers(sentence)):
+        if sentence and all(n in allowed for n in _numbers(sentence)):
             kept.append(sentence)
     return " ".join(kept).strip()
+
+
+def _norm_aspect(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
 
 
 def validate_and_render(
@@ -593,38 +707,67 @@ def validate_and_render(
     sources: List[Dict[str, Any]],
     question: str,
     target_location: Optional[str],
+    planned_aspects: Optional[List[str]] = None,
+    failed_aspects: Optional[List[str]] = None,
 ) -> ResearchReport:
     sources_by_id = {s["id"]: s for s in sources}
     assessments = {a.id.strip().upper(): a for a in analysis.source_assessments}
-    terms = _location_terms(target_location)
+    levels = _location_levels(target_location)
 
-    checked_findings = [check_claim(c, sources_by_id, assessments, terms) for c in analysis.findings]
-    checked_opps = [check_claim(c, sources_by_id, assessments, terms) for c in analysis.opportunities]
+    checked_findings = [check_claim(c, sources_by_id, assessments, levels) for c in analysis.findings]
+    checked_opps = [check_claim(c, sources_by_id, assessments, levels) for c in analysis.opportunities]
 
     key_findings = [_render_claim(c) for c in checked_findings]
     opportunities = [_render_claim(c) for c in checked_opps]
 
-    # Findings that survived as sourced evidence/vendor claims can back recommendations.
-    supported = {
-        i + 1 for i, c in enumerate(checked_findings)
-        if c["sources"] and c["status"] != "rejected_figure"
-    }
+    sourced = {i + 1: c for i, c in enumerate(checked_findings) if _is_sourced(c)}
+
+    # ---- recommendations must rest on sourced findings, and say how strong they are
     recommendations = []
     for rec in analysis.recommendations:
-        basis = sorted({n for n in rec.based_on_findings if n in supported})
-        if basis:
-            recommendations.append(f"{rec.text} (Based on finding{'s' if len(basis) > 1 else ''} {', '.join(map(str, basis))})")
-        else:
+        basis = sorted({n for n in rec.based_on_findings if n in sourced})
+        refs = f"finding{'s' if len(basis) > 1 else ''} {', '.join(map(str, basis))}"
+        basis_text = " ".join(sourced[n]["text"] for n in basis)
+        if not basis:
             recommendations.append(f"[Untested idea] {rec.text} (Not backed by a sourced finding — validate first)")
+        elif not _figures_in(_numbers(rec.text), [{"title": "", "content": basis_text}]):
+            recommendations.append(
+                f"[Untested idea] {rec.text} (Contains figures that are not in the findings it cites — validate first)"
+            )
+        elif any(sourced[n]["strength"] in ("strong", "medium") for n in basis):
+            recommendations.append(f"{rec.text} (Based on {refs})")
+        else:
+            recommendations.append(
+                f"[Weakly supported] {rec.text} (Based on {refs} — vendor, social or non-local evidence only)"
+            )
 
-    unknowns = list(dict.fromkeys(u.strip() for u in analysis.unknowns if u and u.strip()))
+    # ---- unknowns: the analyst's own, plus every planned aspect nothing answered
+    unknowns = [u.strip() for u in analysis.unknowns if u and u.strip()]
 
-    # Honest pricing gap: question asks about prices but no source shows one.
+    failed = {_norm_aspect(a) for a in (failed_aspects or [])}
+    coverage: Dict[str, set] = {}
+    for item in analysis.aspect_coverage:
+        coverage.setdefault(_norm_aspect(item.aspect), set()).update(item.answering_findings)
+
+    for aspect in dict.fromkeys(planned_aspects or []):
+        key = _norm_aspect(aspect)
+        if not key or key == "general":
+            continue
+        answered = {n for n in coverage.get(key, set()) if n in sourced}
+        if answered:
+            continue
+        if key in failed:
+            unknowns.append(f"Not researched: the search for '{aspect}' failed.")
+        else:
+            unknowns.append(f"No usable evidence was found for: {aspect}.")
+
     if _PRICE_WORDS.search(question) and not any(_CURRENCY.search(source_text(s)) for s in sources):
         unknowns.append("No published prices were found in the retrieved sources.")
 
+    unknowns = list(dict.fromkeys(unknowns))
     key_findings += [f"[Not established] {u}" for u in unknowns]
 
+    # ---- sources: only those actually cited by a surviving claim
     cited_ids = []
     for c in checked_findings + checked_opps:
         for s in c["sources"]:
@@ -632,10 +775,13 @@ def validate_and_render(
                 cited_ids.append(s["id"])
     cited_urls = [sources_by_id[i]["url"] for i in sorted(cited_ids, key=lambda x: int(x[1:]))]
 
-    summary = _clean_summary(analysis.summary, sources, question)
-    n_ok = sum(1 for c in checked_findings if c["sources"] and c["status"] != "rejected_figure")
+    # ---- summary: may only repeat figures that survived as sourced findings
+    verified_text = " ".join(c["text"] for c in sourced.values())
+    summary = _clean_summary(analysis.summary, verified_text, question)
+    n_strong = sum(1 for c in sourced.values() if c["strength"] in ("strong", "medium"))
     summary_note = (
-        f" Evidence check: {n_ok} of {len(checked_findings)} findings are backed by cited sources"
+        f" Evidence check: {len(sourced)} of {len(checked_findings)} findings have a cited source; "
+        f"{n_strong} of these are independent evidence from the target area or country"
         f"{f'; {len(unknowns)} points could not be established' if unknowns else ''}."
     )
     summary = (summary or "The sources did not support a confident summary.") + summary_note

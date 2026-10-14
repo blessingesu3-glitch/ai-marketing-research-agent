@@ -135,7 +135,7 @@ def test_competitor_offering_is_not_treated_as_customer_demand(app_module, monke
     )
     result, _, _ = run_pipeline(app, monkeypatch, fake_model, make_plan(app, tasks_from(synthetic, *keys)),
                                 responses_from(synthetic, *keys), analysis)
-    assert result["report"].key_findings[0].startswith("[Vendor claim]")
+    assert result["report"].key_findings[0].startswith("[Vendor claim – Nigeria-wide, not Lagos-specific]")
 
 
 # ------------------------------------------------- 5. missing pricing
@@ -170,7 +170,7 @@ def test_published_price_is_kept_and_no_false_pricing_gap(app_module, monkeypatc
     result, _, _ = run_pipeline(app, monkeypatch, fake_model, make_plan(app, tasks_from(synthetic, *keys)),
                                 responses_from(synthetic, *keys), analysis)
     findings = result["report"].key_findings
-    assert findings[0].startswith("[Vendor claim] BotPal's Starter plan costs ₦25,000")
+    assert findings[0].startswith("[Vendor claim – Nigeria-wide, not Lagos-specific] BotPal's Starter plan costs ₦25,000")
     assert not any("No published prices" in f for f in findings)
 
 
@@ -192,7 +192,7 @@ def test_unsupported_statistic_is_not_presented_as_fact(app_module, monkeypatch,
     report = result["report"]
     assert report.key_findings[0].startswith("[Not established] WhatsApp chatbots reduce service workload by 60%")
     # figure exists in the source, but only as the vendor's own claim
-    assert report.key_findings[1].startswith("[Vendor claim] ChatFlowX customers capture 3x more leads")
+    assert report.key_findings[1].startswith("[Vendor claim – Nigeria-wide, not Lagos-specific] ChatFlowX customers capture 3x more leads")
     assert "60%" not in report.summary
 
 
@@ -292,13 +292,13 @@ def test_report_separates_evidence_inference_recommendations_and_unknowns(app_mo
                                 responses_from(synthetic, *keys), analysis)
     r = result["report"]
     assert r.key_findings[0].startswith("[Evidence]")
-    assert r.key_findings[1].startswith("[Vendor claim]")
+    assert r.key_findings[1].startswith("[Vendor claim – Nigeria-wide, not Lagos-specific]")
     assert "[Not established] Competitor prices in Lagos." in r.key_findings
     assert r.opportunities[0].startswith("[Inference]") and "S1 " in r.opportunities[0]
     assert r.recommendations[0].endswith("(Based on finding 1)")
     assert r.recommendations[1].startswith("[Untested idea]")
     assert r.recommendations[2].startswith("[Untested idea]")   # finding 7 does not exist
-    assert "Evidence check: 2 of 2 findings" in r.summary
+    assert "Evidence check: 2 of 2 findings have a cited source; 1 of these are independent evidence" in r.summary
     assert r.sources == [
         "https://lagos-salon-survey.example/report?utm_source=newsletter",
         "https://chatflowx.example/features",
