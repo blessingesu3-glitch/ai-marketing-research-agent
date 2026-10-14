@@ -66,6 +66,11 @@ class ResearchPlan(BaseModel):
         description="Lowercase English country name for that location "
         "(e.g. 'nigeria', 'kenya', 'united kingdom'). Null if none is named.",
     )
+    offering: Optional[str] = Field(
+        default=None,
+        description="The product or service the user wants to market, in 2-5 words "
+        "(e.g. 'WhatsApp chatbot', 'solar panel installation'). Null if unclear.",
+    )
     tasks: List[ResearchTask] = Field(
         description="Distinct searches, one per part of the question. No duplicates."
     )
@@ -129,7 +134,8 @@ class AspectCoverage(BaseModel):
 
 class AnalysisOutput(BaseModel):
     summary: str = Field(
-        description="3-5 sentences. Only state what the findings support."
+        default="",
+        description="Optional. Not shown to users; the summary is built from checked findings.",
     )
     findings: List[Claim] = Field(default_factory=list)
     opportunities: List[Claim] = Field(default_factory=list)
@@ -277,6 +283,9 @@ question is worded. Examples of the style (adapt to the actual sector/place):
 - local market:   "<business type> <city> book appointment" / "<business type> <city> reviews"
 - customer needs: "<business type> owners complain <problem>" / "<problem> <business type> <country>"
 Avoid abstract phrases like "opportunities for" or "customer segments for".
+Every part the question explicitly asks about needs its own query. If it asks
+about competitors or providers, include a query that finds the providers'
+own websites. If it asks about prices, include a query for pricing pages.
 Put the location in each query when the question names one.
 """
     try:
@@ -291,7 +300,9 @@ Put the location in each query when the question names one.
         plan_dict = {
             "target_location": plan.target_location,
             "country": (plan.country or "").strip().lower() or None,
-            "tasks": tasks,
+            "tasks": ensure_required_searches(
+                question, tasks, plan.offering, plan.country or plan.target_location
+            ),
         }
     except Exception as exc:  # planner failure must not stop research
         print(f"[Plan] Planner failed ({type(exc).__name__}); using the question as one search.")
@@ -301,6 +312,49 @@ Put the location in each query when the question names one.
         plan_dict["tasks"] = [{"aspect": "general", "query": question[:MAX_QUERY_CHARS]}]
 
     return {"plan": plan_dict}
+
+
+# Parts of a question that must get their own search when the question asks for them.
+# (question pattern, pattern that shows a query already covers it, aspect, query template)
+_REQUIRED_SEARCHES = [
+    (re.compile(r"\b(competitor\w*|rivals?|providers?|agencies|alternatives)\b", re.I),
+     re.compile(r"\b(competitor\w*|provider\w*|compan\w*|agenc\w*|vendor\w*|alternatives?)\b", re.I),
+     "competitors", "{offering} provider {place}"),
+    (re.compile(r"\b(pric\w*|cost\w*|fees?|charges?|rates)\b", re.I),
+     re.compile(r"\b(pric\w*|cost\w*|fees?|rates?|per month|plans?)\b", re.I),
+     "published pricing", "{offering} pricing {place} per month"),
+]
+
+
+def ensure_required_searches(
+    question: str, tasks: List[Dict[str, str]], offering: Optional[str], place: Optional[str]
+) -> List[Dict[str, str]]:
+    """Guarantee a competitor / pricing search when the question asks for one.
+
+    Keeps the total at MAX_SEARCHES by replacing the planner's last searches,
+    so this never increases the number of paid Tavily calls.
+    """
+    offering = (offering or "").strip()
+    if not offering:
+        return tasks
+    place = (place or "").strip()
+    tasks = list(tasks)
+    added = 0
+    for asked, covered, aspect, template in _REQUIRED_SEARCHES:
+        if not asked.search(question):
+            continue
+        if any(covered.search(t["query"]) or covered.search(t["aspect"]) for t in tasks):
+            continue
+        new = {"aspect": aspect, "query": " ".join(template.format(offering=offering, place=place).split())}
+        if len(tasks) >= MAX_SEARCHES:
+            replace_at = len(tasks) - 1 - added
+            if replace_at < 0:
+                continue
+            tasks[replace_at] = new
+        else:
+            tasks.append(new)
+        added += 1
+    return tasks
 
 
 def research(state: ResearchState):
@@ -451,7 +505,6 @@ How to answer:
 - For each planned aspect below, list the finding numbers that directly answer it
   (empty if none):
 {aspect_list}
-- The summary may only restate findings. Do not add figures that are not in a finding.
 - Fewer, well-supported findings are better than many weak ones. Empty lists are allowed.
 """
 
@@ -497,6 +550,12 @@ _SOCIAL_HOSTS = (
     "instagram.com", "tiktok.com", "x.com", "twitter.com", "threads.net",
     "nairaland.com", "reddit.com", "quora.com", "pinterest.com",
 )
+# Sites where anyone can upload a document (business plans, essays, slides).
+_UPLOAD_HOSTS = (
+    "scribd.com", "slideshare.net", "academia.edu", "issuu.com", "studocu.com",
+    "coursehero.com", "docplayer.net", "pdfcoffee.com", "dokumen.pub",
+    "documents.pub", "yumpu.com", "pdfslide.net",
+)
 # URL paths that are almost always a company describing its own product.
 _VENDOR_PATH = re.compile(
     r"/(services?|pricing|prices|plans|features|products?|solutions|demo|book-a-demo)(/|\.|-|$)", re.I
@@ -530,6 +589,11 @@ def _host_label(url: str) -> str:
 def is_social(source: Dict[str, Any]) -> bool:
     host = _host(source.get("url", ""))
     return any(host == h or host.endswith("." + h) for h in _SOCIAL_HOSTS)
+
+
+def is_uploaded(source: Dict[str, Any]) -> bool:
+    host = _host(source.get("url", ""))
+    return any(host == h or host.endswith("." + h) for h in _UPLOAD_HOSTS)
 
 
 def is_vendor(source: Dict[str, Any], claim_text: str, assessments: Dict[str, "SourceAssessment"]) -> bool:
@@ -634,7 +698,10 @@ def check_claim(
         if kind != "inference":
             status = "downgraded"
         kind = "inference"
-    elif all(is_social(s) for s in cited):
+    elif all(is_uploaded(s) for s in cited):
+        if kind != "inference":
+            kind, status = "uploaded", "downgraded"
+    elif all(is_social(s) or is_uploaded(s) for s in cited):
         if kind != "inference":
             kind, status = "social", "downgraded"
     elif kind == "evidence" and all(is_vendor(s, claim.text, assessments) for s in cited):
@@ -650,6 +717,8 @@ def check_claim(
         label, strength = "Inference", "weak"
     elif kind == "social":
         label, strength = "Social post" + suffix, "weak"
+    elif kind == "uploaded":
+        label, strength = "Uploaded document" + suffix, "weak"
     elif kind == "vendor_claim":
         label, strength = "Vendor claim" + suffix, "weak"
     else:
@@ -670,6 +739,16 @@ def _is_sourced(checked: Dict[str, Any]) -> bool:
     return bool(checked["sources"]) and not checked["status"].startswith("rejected")
 
 
+def claim_text(checked: Dict[str, Any]) -> str:
+    """Claim text as shown to users. Prices name the one site they come from."""
+    text = checked["text"]
+    if checked["sources"] and _CURRENCY.search(text):
+        host = _host(checked["sources"][0]["url"])
+        if host and host.split(".")[0] not in text.lower():
+            text = f"According to {host}: {text}"
+    return text
+
+
 def _render_claim(checked: Dict[str, Any]) -> str:
     if checked["status"] == "rejected_figure":
         return (
@@ -681,21 +760,63 @@ def _render_claim(checked: Dict[str, Any]) -> str:
             f"[Not established] {checked['text']} — this price combines several sources, "
             "so it cannot be attributed to one provider."
         )
-    line = f"[{checked['label']}] {checked['text']}"
+    line = f"[{checked['label']}] {claim_text(checked)}"
     if checked["sources"]:
         refs = "; ".join(f"{s['id']} {s['url']}" for s in checked["sources"])
         line += f" (Source: {refs})"
     return line
 
 
-def _clean_summary(summary: str, verified_text: str, question: str) -> str:
-    """Keep only summary sentences whose figures appear in a verified finding or the question."""
-    allowed = set(_numbers(verified_text + " " + question))
-    kept = []
-    for sentence in re.split(r"(?<=[.!?])\s+", (summary or "").strip()):
-        if sentence and all(n in allowed for n in _numbers(sentence)):
-            kept.append(sentence)
-    return " ".join(kept).strip()
+def _sentence(text: str) -> str:
+    text = text.strip()
+    return text if text.endswith((".", "!", "?")) else text + "."
+
+
+def build_summary(
+    sourced: List[Dict[str, Any]],
+    total_findings: int,
+    unknowns: List[str],
+    levels: List[Tuple[str, List[str]]],
+) -> str:
+    """Summary written in code from checked findings only, so it cannot overstate.
+
+    The model's own summary is not used: it repeated weak claims as facts.
+    """
+    strong = [c for c in sourced if c["strength"] == "strong"]
+    medium = [c for c in sourced if c["strength"] == "medium"]
+    weak = [c for c in sourced if c["strength"] == "weak"]
+    place = levels[0][0] if levels else None
+    parts = []
+
+    if strong:
+        lead = f"Independent evidence about {place}: " if place else "Independent evidence: "
+        parts.append(lead + " ".join(_sentence(claim_text(c)) for c in strong[:2]))
+    if medium:
+        wider = levels[min(1, len(levels) - 1)][0] if levels else "a wider area"
+        lead = f"Evidence about {wider} as a whole (not specific to {place}): " if place else "Wider evidence: "
+        parts.append(lead + " ".join(_sentence(claim_text(c)) for c in medium[:2]))
+    if not strong and not medium:
+        parts.append(
+            "The sources found no independent evidence for this question"
+            + (f" in {place}." if place else ".")
+        )
+    if weak:
+        n = len(weak)
+        parts.append(
+            f"{n} further finding{'s' if n != 1 else ''} rest{'s' if n == 1 else ''} only on vendor "
+            "websites, social posts, uploaded documents or other regions, and "
+            f"{'is' if n == 1 else 'are'} not independent evidence."
+        )
+    if unknowns:
+        shown = "; ".join(u.rstrip(".") for u in unknowns[:3])
+        more = f" (and {len(unknowns) - 3} more)" if len(unknowns) > 3 else ""
+        parts.append(f"Not established: {shown}{more}.")
+
+    parts.append(
+        f"Evidence check: {len(sourced)} of {total_findings} findings have a cited source; "
+        f"{len(strong) + len(medium)} of these are independent evidence from the target area or country."
+    )
+    return " ".join(parts)
 
 
 def _norm_aspect(text: str) -> str:
@@ -775,16 +896,7 @@ def validate_and_render(
                 cited_ids.append(s["id"])
     cited_urls = [sources_by_id[i]["url"] for i in sorted(cited_ids, key=lambda x: int(x[1:]))]
 
-    # ---- summary: may only repeat figures that survived as sourced findings
-    verified_text = " ".join(c["text"] for c in sourced.values())
-    summary = _clean_summary(analysis.summary, verified_text, question)
-    n_strong = sum(1 for c in sourced.values() if c["strength"] in ("strong", "medium"))
-    summary_note = (
-        f" Evidence check: {len(sourced)} of {len(checked_findings)} findings have a cited source; "
-        f"{n_strong} of these are independent evidence from the target area or country"
-        f"{f'; {len(unknowns)} points could not be established' if unknowns else ''}."
-    )
-    summary = (summary or "The sources did not support a confident summary.") + summary_note
+    summary = build_summary(list(sourced.values()), len(checked_findings), unknowns, levels)
 
     return ResearchReport(
         summary=summary,

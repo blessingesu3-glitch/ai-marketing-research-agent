@@ -61,7 +61,9 @@ def test_summary_cannot_repeat_figures_missing_from_verified_findings(app_module
     assert ids["https://abuja-salons.example/survey"] == "S5"
     summary = result["report"].summary
     assert "1,500,000" not in summary and "10,000" not in summary
-    assert "Salons in Abuja miss WhatsApp enquiries after hours." in summary
+    assert summary.startswith(
+        "Independent evidence about Abuja: Abuja salon owners report missed WhatsApp enquiries after closing hours."
+    )
 
 
 # 2 + 3. A company's LinkedIn post and a YouTube description were labelled "Evidence".
