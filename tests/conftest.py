@@ -16,6 +16,8 @@ import pytest
 os.environ["OPENAI_API_KEY"] = "sk-test-dummy-not-real"
 os.environ["TAVILY_API_KEY"] = "tvly-test-dummy-not-real"
 os.environ["MODEL_NAME"] = "gpt-4o-mini"
+# Follow-up searches are switched on per test (see test_depth.py) so call counts stay predictable.
+os.environ["FOLLOW_UP_ROUNDS"] = "0"
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))

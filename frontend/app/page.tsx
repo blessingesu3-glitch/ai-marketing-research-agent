@@ -173,9 +173,11 @@ export default function Home() {
                 Summary
               </p>
 
-              <p className="max-w-4xl text-lg leading-8 text-black/70">
-                {report.summary}
-              </p>
+              <div className="max-w-4xl space-y-5 text-lg leading-8 text-black/70">
+                {report.summary.split(/\n\s*\n/).map((paragraph, index) => (
+                  <p key={index}>{paragraph}</p>
+                ))}
+              </div>
             </div>
 
             <div className="grid gap-6 md:grid-cols-2">
@@ -199,19 +201,28 @@ export default function Home() {
                   Sources
                 </p>
 
-                <div className="space-y-3">
+                <ol className="space-y-4">
                   {report.sources.map((source, index) => (
-                    <a
-                      key={`${source}-${index}`}
-                      href={source}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="block break-all text-sm leading-6 text-black/60 underline decoration-black/20 underline-offset-4 transition hover:text-black"
-                    >
-                      {source}
-                    </a>
+                    <li key={`${source}-${index}`} className="flex gap-3 text-sm leading-6">
+                      <span className="shrink-0 font-semibold text-black/50">
+                        [{index + 1}]
+                      </span>
+                      <a
+                        href={source}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="min-w-0 text-black/60 transition hover:text-black"
+                      >
+                        <span className="block font-medium text-black/80">
+                          {siteName(source)}
+                        </span>
+                        <span className="block break-all text-xs text-black/40 underline decoration-black/20 underline-offset-4">
+                          {source}
+                        </span>
+                      </a>
+                    </li>
                   ))}
-                </div>
+                </ol>
               </div>
             </div>
 
@@ -254,10 +265,36 @@ function ReportSection({
               {index + 1}
             </span>
 
-            <span>{item}</span>
+            <ReportItem text={item} />
           </li>
         ))}
       </ol>
     </div>
+  );
+}
+
+
+function siteName(url: string) {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return url;
+  }
+}
+
+function ReportItem({ text }: { text: string }) {
+  const match = text.match(/^\[([^\]]+)\]\s*/);
+
+  if (!match) {
+    return <span>{text}</span>;
+  }
+
+  return (
+    <span>
+      <span className="mr-2 inline-block rounded-full bg-black/[0.06] px-2.5 py-0.5 text-[11px] font-medium uppercase tracking-wide text-black/50">
+        {match[1]}
+      </span>
+      {text.slice(match[0].length)}
+    </span>
   );
 }

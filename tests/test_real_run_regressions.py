@@ -61,9 +61,7 @@ def test_summary_cannot_repeat_figures_missing_from_verified_findings(app_module
     assert ids["https://abuja-salons.example/survey"] == "S5"
     summary = result["report"].summary
     assert "1,500,000" not in summary and "10,000" not in summary
-    assert summary.startswith(
-        "Independent evidence about Abuja: Abuja salon owners report missed WhatsApp enquiries after closing hours."
-    )
+    assert summary.startswith("Salons in Abuja miss WhatsApp enquiries after hours.")
 
 
 # 2 + 3. A company's LinkedIn post and a YouTube description were labelled "Evidence".
@@ -108,7 +106,8 @@ def test_single_source_price_claim_is_kept_and_attributed(app_module, monkeypatc
     finding = result["report"].key_findings[0]
     # detected as the company's own page because the claim names the cited domain
     assert finding.startswith("[Vendor claim – Nigeria-wide, not Abuja-specific] MusskartX")
-    assert "https://musskartx.example/" in finding
+    assert finding.endswith("[1]")
+    assert result["report"].sources == ["https://musskartx.example/ai-chatbot-whatsapp-automation-nigeria.html"]
 
 
 # 5. Recommendations rested only on vendor/social findings, or added a price.
