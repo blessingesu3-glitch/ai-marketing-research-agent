@@ -93,7 +93,10 @@ SourceType = Literal[
 
 
 class Claim(BaseModel):
-    text: str = Field(description="One specific claim, written as a single sentence.")
+    text: str = Field(
+        description="2-3 sentences: what the source shows (names, offers, prices, numbers "
+        "exactly as the source gives them) and why it matters for the user's goal."
+    )
     kind: ClaimKind = Field(
         description="'evidence' = a source directly shows this; "
         "'vendor_claim' = a company says this about its own product/results; "
@@ -110,7 +113,9 @@ class Claim(BaseModel):
 
 
 class Recommendation(BaseModel):
-    text: str
+    text: str = Field(
+        description="2-4 sentences: the action, who it is for, and the reasoning from the findings."
+    )
     based_on_findings: List[int] = Field(
         default_factory=list,
         description="1-based numbers of the key findings this recommendation relies on.",
@@ -135,7 +140,9 @@ class AspectCoverage(BaseModel):
 class AnalysisOutput(BaseModel):
     summary: str = Field(
         default="",
-        description="Optional. Not shown to users; the summary is built from checked findings.",
+        description="Executive summary, 3-5 short paragraphs separated by blank lines "
+        "(about 250-450 words). Cover every part of the question, compare the options, "
+        "and end with the main recommendation and its reasoning.",
     )
     findings: List[Claim] = Field(default_factory=list)
     opportunities: List[Claim] = Field(default_factory=list)
@@ -146,6 +153,11 @@ class AnalysisOutput(BaseModel):
     )
     source_assessments: List[SourceAssessment] = Field(default_factory=list)
     aspect_coverage: List[AspectCoverage] = Field(default_factory=list)
+    follow_up_queries: List[str] = Field(
+        default_factory=list,
+        description="Up to 3 short web searches that would fill the most important gaps. "
+        "Empty if the sources already answer the question well.",
+    )
 
 
 # =====================================================================
@@ -159,6 +171,8 @@ class ResearchState(TypedDict, total=False):
     failed_queries: List[Dict[str, str]]
     search_results: str          # kept for API/CLI compatibility
     report: Optional[ResearchReport]
+    pending_tasks: List[Dict[str, str]]   # follow-up searches waiting to run
+    round: int                            # 0 = first pass, 1 = after follow-up searches
 
 
 # =====================================================================
@@ -172,11 +186,17 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-MAX_SEARCHES = _env_int("MAX_SEARCHES", 5)
-MAX_RESULTS = _env_int("TAVILY_MAX_RESULTS", 5)
+MAX_SEARCHES = _env_int("MAX_SEARCHES", 6)
+MAX_RESULTS = _env_int("TAVILY_MAX_RESULTS", 8)
 SEARCH_DEPTH = os.getenv("TAVILY_SEARCH_DEPTH", "basic")          # "advanced" = 2 credits/search
-INCLUDE_RAW = os.getenv("TAVILY_INCLUDE_RAW_CONTENT", "false").lower() == "true"
+# Read page text, not just the 1-2 sentence snippet. This is what gives the analysis depth.
+INCLUDE_RAW = os.getenv("TAVILY_INCLUDE_RAW_CONTENT", "true").lower() == "true"
 RAW_EXCERPT_CHARS = _env_int("RAW_EXCERPT_CHARS", 1500)
+# The best-scoring sources sent to the analyst (keeps the prompt size predictable).
+MAX_SOURCES_FOR_ANALYSIS = _env_int("MAX_SOURCES_FOR_ANALYSIS", 24)
+# Extra search rounds for gaps: 1 = up to 3 more searches + 1 more analysis call when needed.
+FOLLOW_UP_ROUNDS = _env_int("FOLLOW_UP_ROUNDS", 1)
+MAX_FOLLOW_UP_SEARCHES = 3
 MAX_QUERY_CHARS = 380
 
 model = ChatOpenAI(
@@ -270,11 +290,13 @@ def plan_research(state: ResearchState):
 Question:
 {question}
 
-Split the question into its distinct parts (for example: market or demand
-evidence, customer problems, competitors and what they offer, published prices,
-customer segments, channels, trends). Create ONE short search query per part the
-question actually asks about, up to {MAX_SEARCHES} queries. Do not repeat the
-same search in different words.
+Split the question into the distinct parts it ACTUALLY asks about. Do not add
+topics the question does not ask about. A broad question may have several parts
+(e.g. market, customer problems, competitors, prices, segments). A narrow question
+(e.g. "which keywords should I target") has one part: then search that one topic
+from different angles (e.g. keyword lists, search trends, competitor keywords,
+customer language). Up to {MAX_SEARCHES} queries. Do not repeat the same search in
+different words.
 
 Write each query the way the pages you want are worded, not the way the
 question is worded. Examples of the style (adapt to the actual sector/place):
@@ -300,13 +322,14 @@ Put the location in each query when the question names one.
         plan_dict = {
             "target_location": plan.target_location,
             "country": (plan.country or "").strip().lower() or None,
+            "offering": plan.offering,
             "tasks": ensure_required_searches(
                 question, tasks, plan.offering, plan.country or plan.target_location
             ),
         }
     except Exception as exc:  # planner failure must not stop research
         print(f"[Plan] Planner failed ({type(exc).__name__}); using the question as one search.")
-        plan_dict = {"target_location": None, "country": None, "tasks": []}
+        plan_dict = {"target_location": None, "country": None, "offering": None, "tasks": []}
 
     if not plan_dict["tasks"]:
         plan_dict["tasks"] = [{"aspect": "general", "query": question[:MAX_QUERY_CHARS]}]
@@ -364,11 +387,18 @@ def research(state: ResearchState):
     }
     country = plan.get("country")
 
-    sources: List[Dict[str, Any]] = []
-    by_url: Dict[str, Dict[str, Any]] = {}
-    failed: List[Dict[str, str]] = []
+    # Follow-up round: run only the pending searches and ADD to the sources already found.
+    follow_up = bool(state.get("pending_tasks"))
+    tasks = state.get("pending_tasks") or plan["tasks"]
+    if follow_up:
+        sources: List[Dict[str, Any]] = [dict(s, queries=list(s["queries"])) for s in state.get("sources") or []]
+        failed: List[Dict[str, str]] = list(state.get("failed_queries") or [])
+        print(f"[Research] Follow-up: {len(tasks)} more searches for gaps.")
+    else:
+        sources, failed = [], []
+    by_url: Dict[str, Dict[str, Any]] = {normalize_url(s["url"]): s for s in sources}
 
-    for task in plan["tasks"]:
+    for task in tasks:
         query = task["query"]
         print(f"[Research] Searching: {query}")
         try:
@@ -414,6 +444,7 @@ def research(state: ResearchState):
         "sources": sources,
         "failed_queries": failed,
         "search_results": format_sources_for_prompt(sources),
+        "pending_tasks": [],
     }
 
 
@@ -460,13 +491,48 @@ def format_sources_for_prompt(sources: List[Dict[str, Any]]) -> str:
     return "\n\n".join(blocks)
 
 
+def select_sources_for_analysis(sources: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The best-scoring sources, in their original order (keeps the prompt size predictable)."""
+    if len(sources) <= MAX_SOURCES_FOR_ANALYSIS:
+        return sources
+    ranked = sorted(sources, key=lambda s: -(s.get("score") or 0))[:MAX_SOURCES_FOR_ANALYSIS]
+    keep = {s["id"] for s in ranked}
+    return [s for s in sources if s["id"] in keep]
+
+
+def follow_up_tasks(
+    analysis: "AnalysisOutput", gaps: List[str], state: ResearchState
+) -> List[Dict[str, str]]:
+    """Up to MAX_FOLLOW_UP_SEARCHES new searches for the gaps (no extra model call)."""
+    plan = state.get("plan") or {}
+    used = {re.sub(r"\s+", " ", q.lower()).strip()
+            for s in state.get("sources") or [] for q in s["queries"]}
+    used |= {re.sub(r"\s+", " ", t["query"].lower()).strip() for t in plan.get("tasks", [])}
+
+    candidates = [("follow-up", q) for q in analysis.follow_up_queries]
+    offering = (plan.get("offering") or "").strip()
+    place = (plan.get("country") or plan.get("target_location") or "").strip()
+    candidates += [(g, " ".join(f"{g} {offering} {place}".split())) for g in gaps]
+
+    tasks = []
+    for aspect, query in candidates:
+        key = re.sub(r"\s+", " ", (query or "").lower()).strip()
+        if key and key not in used:
+            used.add(key)
+            tasks.append({"aspect": aspect, "query": query[:MAX_QUERY_CHARS]})
+        if len(tasks) >= MAX_FOLLOW_UP_SEARCHES:
+            break
+    return tasks
+
+
 def analyze(state: ResearchState):
     question = state["question"]
-    sources = state["sources"]
+    sources = select_sources_for_analysis(state["sources"])
     plan = state.get("plan") or {}
     location = plan.get("target_location") or "none named"
+    round_no = state.get("round") or 0
 
-    print("[Analysis] Analyzing the research...")
+    print("[Analysis] Analyzing the research..." + (" (after follow-up searches)" if round_no else ""))
 
     failed_note = ""
     if state.get("failed_queries"):
@@ -478,8 +544,8 @@ def analyze(state: ResearchState):
         f"  - {a}" for a in dict.fromkeys(t["aspect"] for t in plan.get("tasks", []))
     ) or "  - (none)"
 
-    prompt = f"""You are a marketing research analyst. Answer the question using ONLY
-the numbered sources below.
+    prompt = f"""You are a senior marketing research analyst writing a thorough, specific
+report for a client. Use ONLY the numbered sources below.
 
 Question:
 {question}
@@ -490,26 +556,37 @@ Target location: {location}
 Sources:
 {format_sources_for_prompt(sources)}
 
-How to answer:
-- Each finding is one specific claim with the IDs of the sources that directly state it.
-- If a company says something about its own product or results, kind = 'vendor_claim'.
-- A competitor offering a service shows supply, not customer demand.
-- Only copy numbers and prices that appear in the cited source text.
-- If a part of the question is not answered by the sources, add it to 'unknowns'
-  (for example: "No published prices were found for <company>").
-- Opportunities may be inferences, but must say what they are based on.
-- A price claim covers ONE provider and cites only the page that shows that price.
+How to write the report:
+- Cover EVERY part of the question in depth. Use every relevant source; when the
+  sources allow, aim for 8-15 findings rather than a few general ones.
+- Each finding is 2-3 sentences: the specifics (company names, what they offer,
+  who they serve, channels, prices and figures exactly as the source gives them)
+  and why it matters for the user's goal. Cite the IDs of the sources that state it.
+- When several companies or options appear, give each its own finding so they can
+  be compared (offer, target customer, channel, published price or "no published price").
+- If a company describes its own product or results, kind = 'vendor_claim' and write
+  it as "<Company> says ...". A competitor offering a service shows supply, not demand.
+- Only use numbers and prices that appear in the cited source text. A price claim
+  covers ONE provider and cites only the page that shows that price.
 - A company's own website, blog or social post about its product is 'company_or_vendor_page'.
-- Recommendations must list the finding numbers they rely on.
+- Opportunities (3-6): each explains which findings point to it.
+- Recommendations (3-5): concrete actions with the reasoning, listing the finding
+  numbers they rely on.
+- Summary: an executive summary of 3-5 short paragraphs separated by blank lines
+  (about 250-450 words). Specific, no filler. Explain what the evidence shows,
+  compare the options, say what is uncertain, and end with the main recommendation.
+  Attribute company statements ("X says"). Only use numbers that appear in your findings.
+- unknowns: the parts of the question the sources could not answer.
+- follow_up_queries: up to 3 short searches, worded like the pages you want to find,
+  that would fill the most important gaps. Empty if nothing important is missing.
 - Assess every source: is it relevant, and what type is it.
 - For each planned aspect below, list the finding numbers that directly answer it
   (empty if none):
 {aspect_list}
-- Fewer, well-supported findings are better than many weak ones. Empty lists are allowed.
 """
 
     analysis = analyst.invoke([HumanMessage(content=prompt)])
-    report = validate_and_render(
+    report, gaps = build_report(
         analysis,
         sources,
         question,
@@ -517,7 +594,17 @@ How to answer:
         planned_aspects=[t["aspect"] for t in plan.get("tasks", [])],
         failed_aspects=[f["aspect"] for f in state.get("failed_queries") or []],
     )
+
+    if round_no < FOLLOW_UP_ROUNDS and (gaps or analysis.follow_up_queries):
+        tasks = follow_up_tasks(analysis, gaps, state)
+        if tasks:
+            return {"pending_tasks": tasks, "round": round_no + 1}
+
     return {"report": report}
+
+
+def route_after_analyze(state: ResearchState) -> str:
+    return "research" if state.get("pending_tasks") else "done"
 
 
 # =====================================================================
@@ -784,7 +871,7 @@ def claim_text(checked: Dict[str, Any]) -> str:
     return text
 
 
-def _render_claim(checked: Dict[str, Any]) -> str:
+def _render_claim(checked: Dict[str, Any], footnotes: Dict[str, int]) -> str:
     if checked["status"] == "rejected_figure":
         return (
             f"[Not established] {checked['text']} — this figure was not found in "
@@ -796,76 +883,37 @@ def _render_claim(checked: Dict[str, Any]) -> str:
             "so it cannot be attributed to one provider."
         )
     line = f"[{checked['label']}] {claim_text(checked)}"
-    if checked["sources"]:
-        refs = "; ".join(f"{s['id']} {s['url']}" for s in checked["sources"])
-        line += f" (Source: {refs})"
-    return line
+    marks = "".join(f"[{footnotes[s['id']]}]" for s in checked["sources"] if s["id"] in footnotes)
+    return f"{line} {marks}" if marks else line
 
 
-def _sentence(text: str) -> str:
-    text = text.strip()
-    return text if text.endswith((".", "!", "?")) else text + "."
-
-
-def build_summary(
-    sourced: List[Dict[str, Any]],
-    total_findings: int,
-    unknowns: List[str],
-    levels: List[Tuple[str, List[str]]],
-) -> str:
-    """Summary written in code from checked findings only, so it cannot overstate.
-
-    The model's own summary is not used: it repeated weak claims as facts.
-    """
-    strong = [c for c in sourced if c["strength"] == "strong"]
-    medium = [c for c in sourced if c["strength"] == "medium"]
-    weak = [c for c in sourced if c["strength"] == "weak"]
-    place = levels[0][0] if levels else None
-    parts = []
-
-    if strong:
-        lead = f"Independent evidence about {place}: " if place else "Independent evidence: "
-        parts.append(lead + " ".join(_sentence(claim_text(c)) for c in strong[:2]))
-    if medium:
-        wider = levels[min(1, len(levels) - 1)][0] if levels else "a wider area"
-        lead = f"Evidence about {wider} as a whole (not specific to {place}): " if place else "Wider evidence: "
-        parts.append(lead + " ".join(_sentence(claim_text(c)) for c in medium[:2]))
-    if not strong and not medium:
-        parts.append(
-            "The sources found no independent evidence for this question"
-            + (f" in {place}." if place else ".")
-        )
-    if weak:
-        n = len(weak)
-        parts.append(
-            f"{n} further finding{'s' if n != 1 else ''} rest{'s' if n == 1 else ''} only on vendor "
-            "websites, social posts, uploaded documents or other regions, and "
-            f"{'is' if n == 1 else 'are'} not independent evidence."
-        )
-    if unknowns:
-        shown = "; ".join(u.rstrip(".") for u in unknowns[:3])
-        more = f" (and {len(unknowns) - 3} more)" if len(unknowns) > 3 else ""
-        parts.append(f"Not established: {shown}{more}.")
-
-    parts.append(
-        f"Evidence check: {len(sourced)} of {total_findings} findings have a cited source; "
-        f"{len(strong) + len(medium)} of these are independent evidence from the target area or country."
-    )
-    return " ".join(parts)
+def clean_summary(summary: str, verified_text: str, question: str) -> str:
+    """Keep the analyst's paragraphs, minus any sentence whose figures are not in a verified finding."""
+    allowed = set(_numbers(verified_text + " " + question))
+    paragraphs = []
+    for paragraph in re.split(r"\n\s*\n", (summary or "").strip()):
+        kept = [
+            s for s in re.split(r"(?<=[.!?])\s+", paragraph.strip())
+            if s and all(n in allowed for n in _numbers(s))
+        ]
+        if kept:
+            paragraphs.append(" ".join(kept))
+    return "\n\n".join(paragraphs)
 
 
 def _norm_aspect(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
 
 
-def validate_and_render(
+def build_report(
     analysis: AnalysisOutput,
     sources: List[Dict[str, Any]],
     question: str,
     target_location: Optional[str],
     planned_aspects: Optional[List[str]] = None,
     failed_aspects: Optional[List[str]] = None,
-) -> ResearchReport:
+) -> Tuple[ResearchReport, List[str]]:
+    """Check every claim, then render the report. Also returns the unanswered aspects."""
     sources_by_id = {s["id"]: s for s in sources}
     assessments = {a.id.strip().upper(): a for a in analysis.source_assessments}
     levels = _location_levels(target_location)
@@ -873,8 +921,14 @@ def validate_and_render(
     checked_findings = [check_claim(c, sources_by_id, assessments, levels) for c in analysis.findings]
     checked_opps = [check_claim(c, sources_by_id, assessments, levels) for c in analysis.opportunities]
 
-    key_findings = [_render_claim(c) for c in checked_findings]
-    opportunities = [_render_claim(c) for c in checked_opps]
+    # Footnote numbers in order of first use; the Sources list follows the same order.
+    footnotes: Dict[str, int] = {}
+    for c in checked_findings + checked_opps:
+        for s in c["sources"]:
+            footnotes.setdefault(s["id"], len(footnotes) + 1)
+
+    key_findings = [_render_claim(c, footnotes) for c in checked_findings]
+    opportunities = [_render_claim(c, footnotes) for c in checked_opps]
 
     sourced = {i + 1: c for i, c in enumerate(checked_findings) if _is_sourced(c)}
 
@@ -899,6 +953,7 @@ def validate_and_render(
 
     # ---- unknowns: the analyst's own, plus every planned aspect nothing answered
     unknowns = [u.strip() for u in analysis.unknowns if u and u.strip()]
+    gaps: List[str] = []
 
     failed = {_norm_aspect(a) for a in (failed_aspects or [])}
     coverage: Dict[str, set] = {}
@@ -928,7 +983,7 @@ def validate_and_render(
 
     for aspect in dict.fromkeys(planned_aspects or []):
         key = _norm_aspect(aspect)
-        if not key or key == "general":
+        if not key or key in ("general", "follow up"):
             continue
         listed = coverage_for(key)
         if listed is not None:
@@ -942,6 +997,7 @@ def validate_and_render(
             }
         if answered:
             continue
+        gaps.append(aspect)
         aspect_words = set(key.split())
         if any(aspect_words <= set(_norm_aspect(u).split()) for u in unknowns):
             continue  # the analyst already reported this gap
@@ -956,23 +1012,43 @@ def validate_and_render(
     unknowns = list(dict.fromkeys(unknowns))
     key_findings += [f"[Not established] {u}" for u in unknowns]
 
-    # ---- sources: only those actually cited by a surviving claim
-    cited_ids = []
-    for c in checked_findings + checked_opps:
-        for s in c["sources"]:
-            if s["id"] not in cited_ids:
-                cited_ids.append(s["id"])
-    cited_urls = [sources_by_id[i]["url"] for i in sorted(cited_ids, key=lambda x: int(x[1:]))]
+    # ---- sources: numbered in footnote order
+    by_number = sorted(footnotes.items(), key=lambda item: item[1])
+    cited_urls = [sources_by_id[sid]["url"] for sid, _n in by_number]
 
-    summary = build_summary(list(sourced.values()), len(checked_findings), unknowns, levels)
+    # ---- summary: the analyst's own (fuller) summary, with unverified figures removed
+    verified_text = " ".join(claim_text(c) for c in sourced.values())
+    summary = clean_summary(analysis.summary, verified_text, question)
+    if not summary:
+        summary = "The sources did not support a confident summary."
+    if unknowns:
+        shown = "; ".join(u.rstrip(".") for u in unknowns[:4])
+        more = f" (and {len(unknowns) - 4} more)" if len(unknowns) > 4 else ""
+        summary += f"\n\nNot established from the available sources: {shown}{more}."
 
-    return ResearchReport(
+    report = ResearchReport(
         summary=summary,
         key_findings=key_findings,
         opportunities=opportunities,
         recommendations=recommendations,
         sources=cited_urls,
     )
+    return report, gaps
+
+
+def validate_and_render(
+    analysis: AnalysisOutput,
+    sources: List[Dict[str, Any]],
+    question: str,
+    target_location: Optional[str],
+    planned_aspects: Optional[List[str]] = None,
+    failed_aspects: Optional[List[str]] = None,
+) -> ResearchReport:
+    """Backwards-compatible wrapper: the checked report only."""
+    report, _gaps = build_report(
+        analysis, sources, question, target_location, planned_aspects, failed_aspects
+    )
+    return report
 
 
 # =====================================================================
@@ -993,7 +1069,12 @@ workflow.add_conditional_edges(
     route_after_research,
     {"analyze": "analyze", "insufficient_evidence": "insufficient_evidence"},
 )
-workflow.add_edge("analyze", END)
+# After analysis: one optional follow-up round of searches for gaps, then analyse again.
+workflow.add_conditional_edges(
+    "analyze",
+    route_after_analyze,
+    {"research": "research", "done": END},
+)
 workflow.add_edge("insufficient_evidence", END)
 
 app = workflow.compile()

@@ -56,8 +56,6 @@ def test_country_article_mentioning_city_is_not_city_evidence(app_module, monkey
     )
     report = run(app, monkeypatch, fake_model, analysis)
     assert report.key_findings[0].startswith("[Evidence – Nigeria-wide, not Abuja-specific]")
-    assert not report.summary.startswith("Independent evidence about Abuja")
-    assert "Evidence about Nigeria as a whole (not specific to Abuja)" in report.summary
 
 
 def test_claim_about_the_city_with_city_source_is_still_city_evidence(app_module, monkeypatch, fake_model):

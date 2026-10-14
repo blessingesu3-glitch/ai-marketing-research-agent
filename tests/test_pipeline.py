@@ -81,7 +81,7 @@ def test_relevant_local_source_supports_finding_with_inline_citation(app_module,
                                 responses_from(synthetic, *keys), analysis)
     finding = result["report"].key_findings[0]
     assert finding.startswith("[Evidence] 28 of 40 surveyed Lagos salon owners")
-    assert "S1 https://lagos-salon-survey.example/report" in finding
+    assert finding.endswith("[1]")                     # footnote number, not a web address
     assert result["report"].sources == ["https://lagos-salon-survey.example/report?utm_source=newsletter"]
 
 
@@ -120,7 +120,8 @@ def test_international_evidence_is_not_presented_as_local(app_module, monkeypatc
                                 responses_from(synthetic, *keys), analysis)
     finding = result["report"].key_findings[0]
     assert finding.startswith("[Evidence – not specific to target location]")
-    assert "us-smb-study.example" in finding
+    assert finding.endswith("[1]")
+    assert result["report"].sources == ["https://us-smb-study.example/chatbots"]
 
 
 # ------------------------------------------------- 4. competitor offer != demand
@@ -211,7 +212,8 @@ def test_duplicate_urls_are_merged_and_unretrieved_ids_are_dropped(app_module, m
                                 responses_from(synthetic, *keys), analysis)
     assert len(result["sources"]) == 1  # www. + trailing slash duplicate merged
     finding = result["report"].key_findings[0]
-    assert "S9" not in finding and "S1 https://chatflowx.example/features" in finding
+    assert "S9" not in finding and finding.endswith("[1]")
+    assert result["report"].sources == ["https://chatflowx.example/features"]
 
 
 # ------------------------------------------------- 8. failed / empty searches
@@ -294,11 +296,12 @@ def test_report_separates_evidence_inference_recommendations_and_unknowns(app_mo
     assert r.key_findings[0].startswith("[Evidence]")
     assert r.key_findings[1].startswith("[Vendor claim – Nigeria-wide, not Lagos-specific]")
     assert "[Not established] Competitor prices in Lagos." in r.key_findings
-    assert r.opportunities[0].startswith("[Inference]") and "S1 " in r.opportunities[0]
+    assert r.opportunities[0].startswith("[Inference]") and r.opportunities[0].endswith("[1]")
     assert r.recommendations[0].endswith("(Based on finding 1)")
     assert r.recommendations[1].startswith("[Untested idea]")
     assert r.recommendations[2].startswith("[Untested idea]")   # finding 7 does not exist
-    assert "Evidence check: 2 of 2 findings have a cited source; 1 of these are independent evidence" in r.summary
+    assert r.summary.startswith("Survey shows WhatsApp is the main booking channel.")
+    assert "Not established from the available sources: Competitor prices in Lagos" in r.summary
     assert r.sources == [
         "https://lagos-salon-survey.example/report?utm_source=newsletter",
         "https://chatflowx.example/features",

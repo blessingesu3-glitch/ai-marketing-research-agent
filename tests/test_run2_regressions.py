@@ -55,19 +55,22 @@ def test_price_from_one_site_names_that_site(app_module, monkeypatch, fake_model
     assert "According to musskartx.example: AI chatbot setup in Nigeria typically costs ₦300,000" in finding
 
 
-# 2. Summary said "In Abuja, beauty businesses face challenges..." from a vendor/upload claim.
-def test_summary_does_not_restate_weak_claims_as_fact(app_module, monkeypatch, fake_model):
+# 2. The code-built summary was too short. The analyst's summary is used again:
+#    its paragraphs are kept, only sentences with unverified figures are removed.
+def test_summary_keeps_analyst_paragraphs_and_drops_unverified_figures(app_module, monkeypatch, fake_model):
     app = app_module
     analysis = A(app,
-        summary="In Abuja, beauty businesses face challenges with booking systems.",   # ignored now
+        summary=("Beauty businesses in Abuja mainly take bookings by phone and walk-in. "
+                 "The market is worth ₦9 billion.\n\n"
+                 "Uploaded business plans describe long wait times, but these are not independent evidence."),
         findings=[C(app, "Beauty businesses in Abuja face long wait times when booking appointments.", ids=["S1"])],
-        source_assessments=[SA(app, "S1", source_type="company_or_vendor_page")],
+        source_assessments=[SA(app, "S1")],
     )
     result = run(app, monkeypatch, fake_model, analysis, [("customer problems", "q-scribd")])
-    summary = result["report"].summary
-    assert "In Abuja, beauty businesses face challenges" not in summary
-    assert summary.startswith("The sources found no independent evidence for this question in Abuja.")
-    assert "1 further finding rests only on vendor websites, social posts, uploaded documents" in summary
+    paragraphs = result["report"].summary.split("\n\n")
+    assert paragraphs[0] == "Beauty businesses in Abuja mainly take bookings by phone and walk-in."
+    assert paragraphs[1].startswith("Uploaded business plans describe long wait times")
+    assert "9 billion" not in result["report"].summary
 
 
 # 3. A business plan uploaded to Scribd was treated as a competitor / evidence.
@@ -81,23 +84,6 @@ def test_uploaded_documents_are_labelled_as_such(app_module, monkeypatch, fake_m
     assert result["report"].key_findings[0].startswith("[Uploaded document] Beauty businesses in Abuja")
 
 
-# Summary shows strong and country-wide evidence separately, in plain words.
-def test_summary_separates_local_and_country_wide_evidence(app_module, monkeypatch, fake_model):
-    app = app_module
-    analysis = A(app,
-        findings=[
-            C(app, "Abuja salon owners said missed WhatsApp enquiries after closing hours were their main booking problem.", ids=["S2"]),
-            C(app, "The Nigeria beauty and personal care market is expected to grow 9.1% a year.", ids=["S1"]),
-        ],
-        source_assessments=[SA(app, "S1"), SA(app, "S2")],
-    )
-    result = run(app, monkeypatch, fake_model, analysis, [("market", "q-market")])
-    summary = result["report"].summary
-    assert summary.startswith("Independent evidence about Abuja: Abuja salon owners said missed WhatsApp")
-    assert "Evidence about Nigeria as a whole (not specific to Abuja): The Nigeria beauty" in summary
-    assert "Evidence check: 2 of 2 findings have a cited source; 2 of these" in summary
-
-
 # 4. The planner skipped the competitor part of the question.
 def test_missing_competitor_search_is_added_without_extra_calls(app_module):
     app = app_module
@@ -108,10 +94,12 @@ def test_missing_competitor_search_is_added_without_extra_calls(app_module):
         {"aspect": "pricing", "query": "WhatsApp automation pricing Nigeria beauty businesses"},
         {"aspect": "engagement", "query": "beauty business customer engagement solutions Abuja"},
     ]
+    while len(tasks) < app.MAX_SEARCHES:                       # fill to the configured maximum
+        tasks.insert(3, {"aspect": f"extra {len(tasks)}", "query": f"salon trends Abuja {len(tasks)}"})
     out = app.ensure_required_searches(QUESTION, tasks, "WhatsApp chatbot", "nigeria")
     assert len(out) == len(tasks) == app.MAX_SEARCHES          # no extra Tavily calls
     assert out[-1] == {"aspect": "competitors", "query": "WhatsApp chatbot provider nigeria"}
-    assert out[3]["aspect"] == "pricing"                        # pricing already covered, kept
+    assert any(t["aspect"] == "pricing" for t in out)           # pricing already covered, kept
 
 
 def test_missing_competitor_and_pricing_both_added(app_module):
