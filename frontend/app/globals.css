@@ -29,14 +29,14 @@
   --color-faint: var(--faint);
   --color-quiet: var(--quiet);
   --color-tan: var(--tan);
-  --font-sans: var(--font-hanken), system-ui, sans-serif;
-  --font-serif: var(--font-cormorant), Georgia, serif;
+  --font-sans: var(--font-manrope), system-ui, sans-serif;
+  --font-serif: var(--font-fraunces), Georgia, serif;
 }
 
 body {
   background: var(--page);
   color: var(--ink);
-  font-family: var(--font-hanken), system-ui, sans-serif;
+  font-family: var(--font-manrope), system-ui, sans-serif;
 }
 
 ::selection {
