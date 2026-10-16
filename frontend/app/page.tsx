@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState, useSyncExternalStore } from "react";
 
 type Report = {
   question: string;
@@ -15,11 +15,152 @@ const API_URL =
   process.env.NEXT_PUBLIC_API_URL ||
   "http://localhost:8000";
 
+type Profile = {
+  business_name: string;
+  industry: string;
+  offering: string;
+  location: string;
+  target_customer: string;
+  goal: string;
+  competitors: string;
+  price_point: string;
+};
+
+const EMPTY_PROFILE: Profile = {
+  business_name: "",
+  industry: "",
+  offering: "",
+  location: "",
+  target_customer: "",
+  goal: "",
+  competitors: "",
+  price_point: "",
+};
+
+const PROFILE_FIELDS: {
+  key: keyof Profile;
+  label: string;
+  placeholder: string;
+  maxLength: number;
+  wide?: boolean;
+}[] = [
+  { key: "business_name", label: "Business name", placeholder: "e.g. BrightSmile Dental", maxLength: 120 },
+  { key: "industry", label: "Industry", placeholder: "e.g. Dental clinic", maxLength: 120 },
+  { key: "offering", label: "What you sell", placeholder: "e.g. Teeth whitening and braces", maxLength: 300, wide: true },
+  { key: "location", label: "Location / markets", placeholder: "e.g. Lekki, Lagos, Nigeria", maxLength: 120 },
+  { key: "price_point", label: "Price point", placeholder: "e.g. Mid-range, from ₦50,000", maxLength: 120 },
+  { key: "target_customer", label: "Target customer", placeholder: "e.g. Young professionals aged 25-40", maxLength: 300, wide: true },
+  { key: "goal", label: "Marketing goal", placeholder: "e.g. More bookings from Instagram", maxLength: 300, wide: true },
+  { key: "competitors", label: "Known competitors", placeholder: "Names or websites, separated by commas", maxLength: 500, wide: true },
+];
+
+const PROFILE_STORAGE_KEY = "marketing-agent-business-profile";
+const PROFILE_CHANGED_EVENT = "marketing-agent-profile-changed";
+
+// Read the saved profile through React's external-store hook (no setState in effects).
+function subscribeToProfile(onChange: () => void) {
+  window.addEventListener("storage", onChange);
+  window.addEventListener(PROFILE_CHANGED_EVENT, onChange);
+  return () => {
+    window.removeEventListener("storage", onChange);
+    window.removeEventListener(PROFILE_CHANGED_EVENT, onChange);
+  };
+}
+
+function readStoredProfileText(): string | null {
+  try {
+    return window.localStorage.getItem(PROFILE_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function parseProfile(raw: string | null): Profile | null {
+  if (!raw) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(raw) as Partial<Profile>;
+    const profile = { ...EMPTY_PROFILE };
+    for (const field of PROFILE_FIELDS) {
+      const value = parsed[field.key];
+      profile[field.key] = typeof value === "string" ? value.slice(0, field.maxLength) : "";
+    }
+    return hasProfileData(profile) ? profile : null;
+  } catch {
+    return null;
+  }
+}
+
+function hasProfileData(profile: Profile | null): profile is Profile {
+  return !!profile && Object.values(profile).some((value) => value.trim() !== "");
+}
+
 export default function Home() {
   const [question, setQuestion] = useState("");
   const [report, setReport] = useState<Report | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+
+  // Business profile: saved in this browser only, used only when the box is ticked.
+  const storedProfileText = useSyncExternalStore(
+    subscribeToProfile,
+    readStoredProfileText,
+    () => null, // server render: no profile yet
+  );
+  // Used only if the browser blocks storage (e.g. some private windows).
+  const [sessionProfile, setSessionProfile] = useState<Profile | null>(null);
+  const savedProfile = useMemo(
+    () => parseProfile(storedProfileText) ?? sessionProfile,
+    [storedProfileText, sessionProfile],
+  );
+
+  const [profileDraft, setProfileDraft] = useState<Profile>(EMPTY_PROFILE);
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [profileNotice, setProfileNotice] = useState("");
+  const [useProfile, setUseProfile] = useState(false);
+  const [tailoredTo, setTailoredTo] = useState("");
+
+  function toggleProfilePanel() {
+    if (!profileOpen) {
+      setProfileDraft(savedProfile ?? EMPTY_PROFILE);
+    }
+    setProfileOpen(!profileOpen);
+    setProfileNotice("");
+  }
+
+  function saveProfile() {
+    if (!hasProfileData(profileDraft)) {
+      setProfileNotice("Fill in at least one field before saving.");
+      return;
+    }
+    setProfileOpen(false);
+    try {
+      window.localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify(profileDraft));
+      setSessionProfile(null);
+      window.dispatchEvent(new Event(PROFILE_CHANGED_EVENT));
+      setProfileNotice("Profile saved in this browser.");
+    } catch {
+      setSessionProfile(profileDraft);
+      setProfileNotice("Profile saved for this visit only (your browser blocked storage).");
+    }
+  }
+
+  function clearProfile() {
+    setProfileDraft(EMPTY_PROFILE);
+    setSessionProfile(null);
+    setUseProfile(false);
+    try {
+      window.localStorage.removeItem(PROFILE_STORAGE_KEY);
+      window.dispatchEvent(new Event(PROFILE_CHANGED_EVENT));
+    } catch {
+      // nothing stored, nothing to remove
+    }
+    setProfileNotice("Profile cleared.");
+  }
+
+  const profileName =
+    savedProfile?.business_name.trim() || savedProfile?.industry.trim() || "my business";
 
   async function handleResearch() {
     if (loading) {
@@ -35,6 +176,9 @@ export default function Home() {
     setError("");
     setReport(null);
 
+    const sendProfile = useProfile && hasProfileData(savedProfile);
+    setTailoredTo(sendProfile ? profileName : "");
+
     try {
       const response = await fetch(`${API_URL}/research`, {
         method: "POST",
@@ -43,6 +187,7 @@ export default function Home() {
         },
         body: JSON.stringify({
           question: question.trim(),
+          ...(sendProfile ? { profile: savedProfile } : {}),
         }),
       });
 
@@ -101,6 +246,86 @@ export default function Home() {
           </div>
         </header>
 
+        <section className="mb-6 rounded-3xl border border-black/10 bg-white p-5 md:p-7">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <p className="text-sm font-semibold">Business profile</p>
+              <p className="mt-1 text-sm text-black/45">
+                {savedProfile
+                  ? `Saved: ${profileName}. Tick "Tailor" below to use it for a question.`
+                  : "Optional. Add your business once to get research tailored to it."}
+              </p>
+            </div>
+
+            <button
+              type="button"
+              onClick={toggleProfilePanel}
+              className="shrink-0 rounded-full border border-black/10 bg-white px-5 py-2.5 text-sm font-semibold transition hover:border-black/30"
+            >
+              {profileOpen ? "Close" : savedProfile ? "Edit profile" : "Add profile"}
+            </button>
+          </div>
+
+          {profileOpen && (
+            <div className="mt-6">
+              <div className="grid gap-4 md:grid-cols-2">
+                {PROFILE_FIELDS.map((field) => (
+                  <label
+                    key={field.key}
+                    className={`block ${field.wide ? "md:col-span-2" : ""}`}
+                  >
+                    <span className="mb-1.5 block text-xs font-semibold uppercase tracking-[0.12em] text-black/45">
+                      {field.label}
+                    </span>
+                    <input
+                      type="text"
+                      value={profileDraft[field.key]}
+                      maxLength={field.maxLength}
+                      placeholder={field.placeholder}
+                      onChange={(event) =>
+                        setProfileDraft((draft) => ({
+                          ...draft,
+                          [field.key]: event.target.value,
+                        }))
+                      }
+                      className="w-full rounded-xl border border-black/10 bg-[#fafafa] px-4 py-3 text-sm outline-none transition focus:border-black/30 focus:bg-white"
+                    />
+                  </label>
+                ))}
+              </div>
+
+              <div className="mt-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <p className="text-xs text-black/40">
+                  Saved only in this browser. It is sent with a question only when you tick
+                  &ldquo;Tailor&rdquo;.
+                </p>
+                <div className="flex gap-3">
+                  {savedProfile && (
+                    <button
+                      type="button"
+                      onClick={clearProfile}
+                      className="rounded-full border border-black/10 px-5 py-2.5 text-sm font-semibold text-black/60 transition hover:border-black/30"
+                    >
+                      Clear
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={saveProfile}
+                    className="rounded-full bg-black px-6 py-2.5 text-sm font-semibold text-white transition hover:bg-black/80"
+                  >
+                    Save profile
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {profileNotice && (
+            <p className="mt-4 text-sm text-black/55">{profileNotice}</p>
+          )}
+        </section>
+
         <section className="rounded-3xl border border-black/10 bg-white p-5 shadow-sm md:p-7">
           <div className="mb-4 flex items-center justify-between">
             <label
@@ -125,9 +350,22 @@ export default function Home() {
           />
 
           <div className="mt-5 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-            <p className="text-sm text-black/45">
-              The agent uses web search and an LLM to research your question.
-            </p>
+            <label
+              className={`flex items-center gap-3 text-sm ${
+                savedProfile ? "cursor-pointer text-black/70" : "cursor-not-allowed text-black/35"
+              }`}
+            >
+              <input
+                type="checkbox"
+                checked={useProfile && !!savedProfile}
+                disabled={!savedProfile}
+                onChange={(event) => setUseProfile(event.target.checked)}
+                className="h-4 w-4 accent-black"
+              />
+              {savedProfile
+                ? `Tailor this research to ${profileName}`
+                : "Tailor to my business (add a profile first)"}
+            </label>
 
             <button
               onClick={handleResearch}
@@ -166,6 +404,12 @@ export default function Home() {
               <h2 className="text-2xl font-semibold tracking-tight">
                 {report.question}
               </h2>
+
+              {tailoredTo && (
+                <p className="mt-3 text-sm text-black/50">
+                  Tailored to: {tailoredTo}
+                </p>
+              )}
             </div>
 
             <div className="rounded-3xl border border-black/10 bg-white p-7 md:p-9">

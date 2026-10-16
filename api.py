@@ -1,10 +1,10 @@
-from typing import List
+from typing import List, Optional
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from app import app as research_graph
+from app import BusinessProfile, app as research_graph
 
 
 api = FastAPI(
@@ -27,7 +27,8 @@ api.add_middleware(
 
 
 class ResearchRequest(BaseModel):
-    question: str
+    question: str = Field(min_length=3, max_length=2000)
+    profile: Optional[BusinessProfile] = None   # optional: tailor the research to this business
 
 
 class ResearchReportResponse(BaseModel):
@@ -53,6 +54,7 @@ def run_research(request: ResearchRequest):
     result = research_graph.invoke(
         {
             "question": request.question,
+            "profile": request.profile.model_dump() if request.profile else None,
             "search_results": "",
             "report": None,
         }
