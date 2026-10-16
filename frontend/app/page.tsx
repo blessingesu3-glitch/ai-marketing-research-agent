@@ -631,6 +631,17 @@ export default function Home() {
               </div>
             </div>
 
+            <DeliverablePanel
+              source={{
+                question: report.question,
+                summary: report.summary,
+                key_findings: report.key_findings,
+                opportunities: report.opportunities,
+                recommendations: report.recommendations,
+              }}
+              profile={tailoredTo ? savedProfile : null}
+            />
+
             <button
               onClick={() => {
                 setReport(null);
@@ -647,6 +658,7 @@ export default function Home() {
           <TeardownView
             teardown={teardown}
             tailoredTo={tailoredTo}
+            profile={tailoredTo ? savedProfile : null}
             onReset={() => {
               setTeardown(null);
               setCompetitorInputs(["", "", ""]);
@@ -727,10 +739,12 @@ const TEARDOWN_ROWS: { key: keyof CompetitorCard; label: string }[] = [
 function TeardownView({
   teardown,
   tailoredTo,
+  profile,
   onReset,
 }: {
   teardown: Teardown;
   tailoredTo: string;
+  profile: Profile | null;
   onReset: () => void;
 }) {
   return (
@@ -872,6 +886,21 @@ function TeardownView({
         </div>
       )}
 
+      <DeliverablePanel
+        source={{
+          question: `Competitor teardown: ${teardown.competitors.map((c) => c.name).join(" vs ")}`,
+          summary: teardown.summary,
+          key_findings: teardown.competitors.map(
+            (c) =>
+              `${c.name}: sells ${c.offer} Pricing: ${c.pricing}. Target customer: ${c.target_customer}. ` +
+              `Main message: ${c.positioning} Channels: ${c.channels}.`,
+          ),
+          opportunities: teardown.gaps,
+          recommendations: teardown.recommendations,
+        }}
+        profile={profile}
+      />
+
       <button
         onClick={onReset}
         className="rounded-full border border-black/10 bg-white px-6 py-3 text-sm font-semibold transition hover:border-black/30"
@@ -879,5 +908,162 @@ function TeardownView({
         Start a new teardown
       </button>
     </section>
+  );
+}
+
+type SourceReport = {
+  question: string;
+  summary: string;
+  key_findings: string[];
+  opportunities: string[];
+  recommendations: string[];
+};
+
+type DeliverableKind = "campaign_brief" | "ad_copy" | "content_calendar";
+
+type Deliverable = {
+  kind: DeliverableKind;
+  title: string;
+  sections: { heading: string; items: string[] }[];
+  text: string;
+};
+
+const DELIVERABLE_BUTTONS: [DeliverableKind, string][] = [
+  ["campaign_brief", "Campaign brief"],
+  ["ad_copy", "Ad copy"],
+  ["content_calendar", "Content calendar"],
+];
+
+function DeliverablePanel({
+  source,
+  profile,
+}: {
+  source: SourceReport;
+  profile: Profile | null;
+}) {
+  const [working, setWorking] = useState<DeliverableKind | null>(null);
+  const [result, setResult] = useState<Deliverable | null>(null);
+  const [error, setError] = useState("");
+  const [copied, setCopied] = useState(false);
+
+  async function create(kind: DeliverableKind) {
+    if (working) {
+      return;
+    }
+    setWorking(kind);
+    setError("");
+    setCopied(false);
+    try {
+      const response = await fetch(`${API_URL}/deliverable`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          kind,
+          report: {
+            ...source,
+            key_findings: source.key_findings.slice(0, 40),
+            opportunities: source.opportunities.slice(0, 20),
+            recommendations: source.recommendations.slice(0, 20),
+          },
+          ...(profile ? { profile } : {}),
+        }),
+      });
+      if (!response.ok) {
+        let detail = "";
+        try {
+          const body = await response.json();
+          detail = typeof body?.detail === "string" ? body.detail : "";
+        } catch {
+          // no readable message
+        }
+        throw new RequestError(response.status === 429 || response.status === 422 ? detail : "");
+      }
+      setResult(await response.json());
+    } catch (err) {
+      console.error(err);
+      setError(
+        err instanceof RequestError && err.message
+          ? err.message
+          : "Could not create this right now. Please try again.",
+      );
+    } finally {
+      setWorking(null);
+    }
+  }
+
+  async function copy() {
+    if (!result) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(result.text);
+      setCopied(true);
+    } catch {
+      setError("Your browser blocked copying. Select the text and copy it instead.");
+    }
+  }
+
+  return (
+    <div className="rounded-3xl border border-black/10 bg-white p-7">
+      <p className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-black/40">
+        Turn this into
+      </p>
+      <p className="mb-5 text-sm text-black/50">
+        Built only from this report{profile ? " and your business profile" : ""}. No new searches.
+      </p>
+      <div className="flex flex-wrap gap-3">
+        {DELIVERABLE_BUTTONS.map(([kind, label]) => (
+          <button
+            key={kind}
+            type="button"
+            onClick={() => create(kind)}
+            disabled={working !== null}
+            className={`rounded-full px-5 py-2.5 text-sm font-semibold transition disabled:cursor-not-allowed ${
+              result?.kind === kind
+                ? "bg-black text-white"
+                : "border border-black/10 bg-white hover:border-black/30 disabled:opacity-50"
+            }`}
+          >
+            {working === kind ? "Writing..." : label}
+          </button>
+        ))}
+      </div>
+
+      {error && (
+        <div className="mt-5 rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+          {error}
+        </div>
+      )}
+
+      {result && working === null && (
+        <div className="mt-7 border-t border-black/[0.07] pt-6">
+          <div className="mb-5 flex items-center justify-between gap-4">
+            <h3 className="text-lg font-semibold tracking-tight">{result.title}</h3>
+            <button
+              type="button"
+              onClick={copy}
+              className="shrink-0 rounded-full border border-black/10 px-4 py-2 text-xs font-semibold transition hover:border-black/30"
+            >
+              {copied ? "Copied" : "Copy all"}
+            </button>
+          </div>
+          <div className="space-y-6">
+            {result.sections.map((section, index) => (
+              <div key={`${section.heading}-${index}`}>
+                <p className="mb-2 text-sm font-semibold text-black/80">{section.heading}</p>
+                <ul className="space-y-2 text-sm leading-6 text-black/70">
+                  {section.items.map((item, i) => (
+                    <li key={i} className="flex gap-3">
+                      <span className="mt-2.5 h-1 w-1 shrink-0 rounded-full bg-black/40" />
+                      <span>{item}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
   );
 }

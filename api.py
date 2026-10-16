@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from app import BusinessProfile, app as research_graph
+from deliverables import Kind, make_deliverable
 from ratelimit import enforce_rate_limit
 from teardown import MAX_COMPETITORS, run_teardown
 
@@ -115,4 +116,49 @@ def run_competitor_teardown(request: TeardownRequest, http_request: Request):
         entries,
         profile=request.profile.model_dump() if request.profile else None,
         focus=request.focus,
+    )
+
+
+# ---------------------------------------------------------------- ready-to-use work
+
+class SourceReport(BaseModel):
+    """The report the user already has (a research report or a teardown turned into this shape)."""
+    question: str = Field(default="", max_length=2000)
+    summary: str = Field(default="", max_length=8000)
+    key_findings: List[str] = Field(default_factory=list, max_length=40)
+    opportunities: List[str] = Field(default_factory=list, max_length=20)
+    recommendations: List[str] = Field(default_factory=list, max_length=20)
+
+
+class DeliverableRequest(BaseModel):
+    kind: Kind
+    report: SourceReport
+    profile: Optional[BusinessProfile] = None
+
+
+class DeliverableSection(BaseModel):
+    heading: str
+    items: List[str]
+
+
+class DeliverableResponse(BaseModel):
+    kind: str
+    title: str
+    sections: List[DeliverableSection]
+    text: str
+
+
+@api.post("/deliverable", response_model=DeliverableResponse)
+def create_deliverable(request: DeliverableRequest, http_request: Request):
+    report = request.report.model_dump()
+    items = report["key_findings"] + report["opportunities"] + report["recommendations"]
+    if not report["summary"].strip() and not items:
+        raise HTTPException(status_code=422, detail="There is no report content to work from.")
+    if any(len(i) > 2000 for i in items):
+        raise HTTPException(status_code=422, detail="A report item is too long.")
+    enforce_rate_limit(http_request)
+    return make_deliverable(
+        request.kind,
+        report,
+        profile=request.profile.model_dump() if request.profile else None,
     )
