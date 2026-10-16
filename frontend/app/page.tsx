@@ -35,6 +35,9 @@ type Mode = "research" | "teardown";
 
 const MAX_COMPETITORS = 3;
 
+/** An error whose message is safe and useful to show the user (e.g. "limit reached"). */
+class RequestError extends Error {}
+
 function splitCompetitors(text: string): string[] {
   return text
     .split(/[,;\n]| and /)
@@ -243,7 +246,17 @@ export default function Home() {
       );
 
       if (!response.ok) {
-        throw new Error("The research request failed.");
+        // 429 = usage limit reached; 422 = input problem. Both carry a readable message.
+        let detail = "";
+        try {
+          const body = await response.json();
+          detail = typeof body?.detail === "string" ? body.detail : "";
+        } catch {
+          // no readable message in the response
+        }
+        throw new RequestError(
+          response.status === 429 || response.status === 422 ? detail : "",
+        );
       }
 
       const data = await response.json();
@@ -255,7 +268,9 @@ export default function Home() {
     } catch (err) {
       console.error(err);
       setError(
-        "Unable to complete the research right now. Please try again."
+        err instanceof RequestError && err.message
+          ? err.message
+          : "Unable to complete the research right now. Please try again.",
       );
     } finally {
       setLoading(false);
