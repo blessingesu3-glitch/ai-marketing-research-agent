@@ -379,34 +379,21 @@ export default function Home() {
       </div>
 
       <main id="top" className="mx-auto w-full max-w-[1180px] px-5 pb-24 md:px-10">
-        {/* Hero */}
-        <section className="flex flex-wrap gap-x-[72px] gap-y-10 border-b border-rule pb-12 pt-14 md:pb-14 md:pt-[88px]">
-          <div className="min-w-0 flex-[999_1_520px]">
-            <p className="eyebrow mb-6 text-gold-deep md:mb-7">Research you can verify</p>
-            <h1 className="font-serif text-[52px] font-medium leading-[0.98] tracking-[-0.015em] sm:text-[64px] md:text-[84px]">
-              Know your market.
-              <br />
-              <span className="italic text-gold-text">Prove</span> every claim.
-            </h1>
-          </div>
-          <div className="flex min-w-0 flex-[1_1_300px] flex-col justify-end gap-7">
-            <p className="text-[17px] leading-[1.7] text-muted">
-              Competitors, prices, customers and keywords, researched across the live web.
-              Every finding is tied to its source and graded for how far it can be trusted.
-            </p>
-            <ol className="border-t border-rule">
-              {[
-                ["i.", "Research a question"],
-                ["ii.", "Tear down up to three competitors"],
-                ["iii.", "Turn findings into briefs, ads and plans"],
-              ].map(([numeral, text]) => (
-                <li key={numeral} className="flex gap-[18px] border-b border-rule-soft py-3 text-sm text-muted">
-                  <span className="w-6 font-serif text-lg italic text-gold-text">{numeral}</span>
-                  {text}
-                </li>
-              ))}
-            </ol>
-          </div>
+        {/* Hero: one column, like the original layout */}
+        <section className="border-b border-rule pb-12 pt-14 md:pb-16 md:pt-[88px]">
+          <p className="eyebrow mb-6 text-gold-deep md:mb-7">Marketing research for any business</p>
+          <h1 className="font-serif text-[46px] font-medium leading-[1.02] tracking-[-0.02em] sm:text-[60px] md:text-[80px]">
+            Know your market.
+            <br />
+            <span className="italic text-gold-text">Prove</span> every claim.
+          </h1>
+          <p className="mt-7 max-w-3xl font-serif text-[22px] leading-[1.35] text-ink md:mt-8 md:text-[28px]">
+            Research your market. Understand your competitors. Find your next opportunity.
+          </p>
+          <p className="mt-4 max-w-2xl text-[16px] leading-[1.75] text-muted md:text-[17px]">
+            Ask any marketing question. The agent searches the live web, reads the pages and gives
+            you a report where every finding links to its source.
+          </p>
         </section>
 
         {/* The writing surface */}
@@ -845,7 +832,8 @@ function MemoSection({ title, children }: { title: string; children: React.React
 
 /** Turn footnote marks like [3] or [1][2] into superscript links to the source list. */
 function withFootnotes(text: string): React.ReactNode[] {
-  return text.split(/((?:\[\d+\])+)/g).map((part, index) => {
+  // Keep a footnote on the same line as the word before it.
+  return text.replace(/\s+(?=\[\d+\])/g, "\u00a0").split(/((?:\[\d+\])+)/g).map((part, index) => {
     const numbers = part.match(/^(?:\[\d+\])+$/) ? part.match(/\d+/g) ?? [] : [];
     if (numbers.length === 0) {
       return part;
