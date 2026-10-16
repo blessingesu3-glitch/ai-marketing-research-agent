@@ -1,10 +1,11 @@
 from typing import List, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from app import BusinessProfile, app as research_graph
+from ratelimit import enforce_rate_limit
 from teardown import MAX_COMPETITORS, run_teardown
 
 
@@ -50,7 +51,10 @@ def health_check():
 
 
 @api.post("/research", response_model=ResearchReportResponse)
-def run_research(request: ResearchRequest):
+def run_research(request: ResearchRequest, http_request: Request):
+    # Checked inside the handler (after the body is validated), so invalid
+    # requests are rejected without using up anyone's quota.
+    enforce_rate_limit(http_request)
 
     result = research_graph.invoke(
         {
@@ -102,10 +106,11 @@ class TeardownResponse(BaseModel):
 
 
 @api.post("/teardown", response_model=TeardownResponse)
-def run_competitor_teardown(request: TeardownRequest):
+def run_competitor_teardown(request: TeardownRequest, http_request: Request):
     entries = [c.strip() for c in request.competitors if c and c.strip()]
     if not entries or any(len(c) > 200 for c in entries):
         raise HTTPException(status_code=422, detail="Give 1-3 competitor names or websites (max 200 characters each).")
+    enforce_rate_limit(http_request)
     return run_teardown(
         entries,
         profile=request.profile.model_dump() if request.profile else None,
