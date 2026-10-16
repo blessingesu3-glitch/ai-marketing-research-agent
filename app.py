@@ -41,6 +41,76 @@ class ResearchReport(BaseModel):
 
 
 # =====================================================================
+# 1b. Optional business profile (saved in the user's browser, sent per request)
+# =====================================================================
+
+class BusinessProfile(BaseModel):
+    business_name: Optional[str] = Field(default=None, max_length=120)
+    industry: Optional[str] = Field(default=None, max_length=120)
+    offering: Optional[str] = Field(default=None, max_length=300, description="What the business sells")
+    location: Optional[str] = Field(default=None, max_length=120, description="City, country or markets served")
+    target_customer: Optional[str] = Field(default=None, max_length=300)
+    goal: Optional[str] = Field(default=None, max_length=300)
+    competitors: Optional[str] = Field(default=None, max_length=500, description="Names or websites, comma-separated")
+    price_point: Optional[str] = Field(default=None, max_length=120)
+
+
+_PROFILE_LABELS = [
+    ("business_name", "Business"),
+    ("industry", "Industry"),
+    ("offering", "Sells"),
+    ("location", "Location / markets"),
+    ("target_customer", "Target customer"),
+    ("goal", "Marketing goal"),
+    ("competitors", "Known competitors"),
+    ("price_point", "Price point"),
+]
+
+
+def clean_profile(profile: Optional[Dict[str, Any]]) -> Optional[Dict[str, str]]:
+    """Keep only filled-in fields. Returns None when nothing useful was given."""
+    if not profile:
+        return None
+    cleaned = {
+        key: " ".join(str(profile.get(key) or "").split())
+        for key, _label in _PROFILE_LABELS
+    }
+    cleaned = {k: v for k, v in cleaned.items() if v}
+    return cleaned or None
+
+
+def profile_block(profile: Optional[Dict[str, str]]) -> str:
+    if not profile:
+        return ""
+    lines = [f"- {label}: {profile[key]}" for key, label in _PROFILE_LABELS if profile.get(key)]
+    return "\n".join(lines)
+
+
+def competitor_names(profile: Optional[Dict[str, str]]) -> List[str]:
+    """'Acme, https://www.beta.com; Gamma' -> ['Acme', 'beta.com', 'Gamma']"""
+    if not profile or not profile.get("competitors"):
+        return []
+    names = []
+    for part in re.split(r"[,;\n]| and ", profile["competitors"]):
+        part = part.strip()
+        if not part:
+            continue
+        if "." in part and " " not in part:          # a website: keep the domain
+            part = re.sub(r"^https?://", "", part).removeprefix("www.").split("/")[0]
+        names.append(part)
+    return list(dict.fromkeys(names))[:5]
+
+
+def country_from_location(location: Optional[str]) -> Optional[str]:
+    """Best-effort country for Tavily's country boost, from a free-text location."""
+    text = (location or "").lower()
+    for country in _COUNTRY_TLDS:
+        if len(country) > 2 and re.search(rf"\b{re.escape(country)}\b", text):
+            return country
+    return None
+
+
+# =====================================================================
 # 2. Planner output: one focused search per part of the question
 # =====================================================================
 
@@ -166,6 +236,7 @@ class AnalysisOutput(BaseModel):
 
 class ResearchState(TypedDict, total=False):
     question: str
+    profile: Optional[Dict[str, str]]     # optional business profile (user-provided context)
     plan: Dict[str, Any]
     sources: List[Dict[str, Any]]
     failed_queries: List[Dict[str, str]]
@@ -283,13 +354,24 @@ def source_text(source: Dict[str, Any]) -> str:
 
 def plan_research(state: ResearchState):
     question = state["question"]
-    print("\n[Plan] Breaking the question into focused searches...")
+    profile = clean_profile(state.get("profile"))
+    print("\n[Plan] Breaking the question into focused searches..."
+          + (" (tailored to the business profile)" if profile else ""))
+
+    profile_note = ""
+    if profile:
+        profile_note = f"""
+The user's business (use it to make the searches specific: their industry, what
+they sell, their location and their customers; if the question names no location,
+use theirs):
+{profile_block(profile)}
+"""
 
     prompt = f"""You plan web searches for a marketing research question.
 
 Question:
 {question}
-
+{profile_note}
 Split the question into the distinct parts it ACTUALLY asks about. Do not add
 topics the question does not ask about. A broad question may have several parts
 (e.g. market, customer problems, competitors, prices, segments). A narrow question
@@ -319,17 +401,26 @@ Put the location in each query when the question names one.
                 seen.add(key)
                 tasks.append({"aspect": task.aspect, "query": task.query[:MAX_QUERY_CHARS]})
         tasks = tasks[:MAX_SEARCHES]
+        location = plan.target_location or (profile or {}).get("location")
+        country = (plan.country or "").strip().lower() or country_from_location(location)
+        offering = plan.offering or (profile or {}).get("offering")
+        tasks = ensure_required_searches(question, tasks, offering, country or location)
+        tasks = ensure_named_competitor_search(question, tasks, competitor_names(profile), offering)
         plan_dict = {
-            "target_location": plan.target_location,
-            "country": (plan.country or "").strip().lower() or None,
-            "offering": plan.offering,
-            "tasks": ensure_required_searches(
-                question, tasks, plan.offering, plan.country or plan.target_location
-            ),
+            "target_location": location,
+            "country": country,
+            "offering": offering,
+            "tasks": tasks,
         }
     except Exception as exc:  # planner failure must not stop research
         print(f"[Plan] Planner failed ({type(exc).__name__}); using the question as one search.")
-        plan_dict = {"target_location": None, "country": None, "offering": None, "tasks": []}
+        location = (profile or {}).get("location")
+        plan_dict = {
+            "target_location": location,
+            "country": country_from_location(location),
+            "offering": (profile or {}).get("offering"),
+            "tasks": [],
+        }
 
     if not plan_dict["tasks"]:
         plan_dict["tasks"] = [{"aspect": "general", "query": question[:MAX_QUERY_CHARS]}]
@@ -377,6 +468,34 @@ def ensure_required_searches(
         else:
             tasks.append(new)
         added += 1
+    return tasks
+
+
+_ASKS_ABOUT_COMPETITORS = re.compile(
+    r"\b(competitor\w*|competition|rivals?|alternatives?|compare|comparison|vs\.?|versus|positioning)\b", re.I
+)
+
+
+def ensure_named_competitor_search(
+    question: str, tasks: List[Dict[str, str]], names: List[str], offering: Optional[str]
+) -> List[Dict[str, str]]:
+    """If the question is about competitors and the profile names some, search for them by name.
+
+    Replaces the planner's last search when at MAX_SEARCHES, so the cost does not grow.
+    """
+    if not names or not _ASKS_ABOUT_COMPETITORS.search(question):
+        return tasks
+    already = " ".join(t["query"].lower() for t in tasks)
+    missing = [n for n in names if n.lower() not in already]
+    if not missing:
+        return tasks
+    query = " ".join((" ".join(missing[:3]) + " " + (offering or "") + " pricing services").split())
+    new = {"aspect": "named competitors", "query": query[:MAX_QUERY_CHARS]}
+    tasks = list(tasks)
+    if len(tasks) >= MAX_SEARCHES:
+        tasks[-1] = new
+    else:
+        tasks.append(new)
     return tasks
 
 
@@ -531,6 +650,15 @@ def analyze(state: ResearchState):
     plan = state.get("plan") or {}
     location = plan.get("target_location") or "none named"
     round_no = state.get("round") or 0
+    profile = clean_profile(state.get("profile"))
+    profile_note = ""
+    if profile:
+        profile_note = f"""
+About the user's own business (written by the user). Use it to TAILOR the analysis,
+comparisons and recommendations to this business. It is NOT evidence: never cite
+it as a source, and never present it as a research finding.
+{profile_block(profile)}
+"""
 
     print("[Analysis] Analyzing the research..." + (" (after follow-up searches)" if round_no else ""))
 
@@ -551,7 +679,7 @@ Question:
 {question}
 
 Target location: {location}
-{failed_note}
+{profile_note}{failed_note}
 
 Sources:
 {format_sources_for_prompt(sources)}
@@ -571,7 +699,9 @@ How to write the report:
 - A company's own website, blog or social post about its product is 'company_or_vendor_page'.
 - Opportunities (3-6): each explains which findings point to it.
 - Recommendations (3-5): concrete actions with the reasoning, listing the finding
-  numbers they rely on.
+  numbers they rely on. If a business profile is given, every recommendation must
+  fit that business (its location, customers, price point and goal), and named
+  competitors should be compared directly with it.
 - Summary: an executive summary of 3-5 short paragraphs separated by blank lines
   (about 250-450 words). Specific, no filler. Explain what the evidence shows,
   compare the options, say what is uncertain, and end with the main recommendation.
