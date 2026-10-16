@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState, useSyncExternalStore } from "react";
+import { useMemo, useRef, useState, useSyncExternalStore } from "react";
 
 type Report = {
   question: string;
@@ -131,11 +131,41 @@ function hasProfileData(profile: Profile | null): profile is Profile {
   return !!profile && Object.values(profile).some((value) => value.trim() !== "");
 }
 
+/** Starter questions that work for any sector. Uses the saved profile where it can. */
+function starterQuestions(profile: Profile | null): { label: string; question: string }[] {
+  const lower = (text: string) => (/^[A-Z][a-z]/.test(text) ? text[0].toLowerCase() + text.slice(1) : text);
+  const offering = lower(profile?.offering.trim() || "[what you sell]");
+  const industry = lower(profile?.industry.trim() || "[type of business]");
+  const business = profile?.business_name.trim() || `a ${industry}`;
+  const place = profile?.location.trim() || "[your city or market]";
+  return [
+    {
+      label: "Competitor prices",
+      question: `Who are the main competitors selling ${offering} in ${place}, and what do they charge?`,
+    },
+    {
+      label: "Customer segments",
+      question: `Which customer groups should ${business} in ${place} target first, and why?`,
+    },
+    {
+      label: "Keyword ideas",
+      question: `What do people search for online when looking for ${offering} in ${place}? Which keywords should we target?`,
+    },
+    {
+      label: "Market entry",
+      question: `Is there room for a new ${industry} in ${place}? What do demand and competition look like?`,
+    },
+  ];
+}
+
 export default function Home() {
   const [question, setQuestion] = useState("");
   const [report, setReport] = useState<Report | null>(null);
+  const [reportDate, setReportDate] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const questionRef = useRef<HTMLTextAreaElement>(null);
+  const deskRef = useRef<HTMLElement>(null);
 
   // Competitor teardown mode
   const [mode, setMode] = useState<Mode>("research");
@@ -168,6 +198,13 @@ export default function Home() {
     }
     setProfileOpen(!profileOpen);
     setProfileNotice("");
+  }
+
+  function openProfileFromNav() {
+    if (!profileOpen) {
+      toggleProfilePanel();
+    }
+    deskRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
   function saveProfile() {
@@ -260,6 +297,9 @@ export default function Home() {
       }
 
       const data = await response.json();
+      setReportDate(
+        new Date().toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" }),
+      );
       if (mode === "teardown") {
         setTeardown(data);
       } else {
@@ -287,6 +327,24 @@ export default function Home() {
     setError("");
   }
 
+  function applyStarter(text: string) {
+    setMode("research");
+    setError("");
+    setQuestion(text);
+    deskRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    // Focus after React renders the research textarea.
+    window.setTimeout(() => {
+      const box = questionRef.current;
+      if (box) {
+        box.focus({ preventScroll: true });
+        const bracket = text.indexOf("[");
+        if (bracket >= 0) {
+          box.setSelectionRange(bracket, text.indexOf("]", bracket) + 1);
+        }
+      }
+    }, 0);
+  }
+
   function handleKeyDown(
     event: React.KeyboardEvent<HTMLTextAreaElement>
   ) {
@@ -296,65 +354,123 @@ export default function Home() {
   }
 
   return (
-    <main className="min-h-screen bg-[#f7f7f5] text-[#111111]">
-      <div className="mx-auto max-w-6xl px-6 py-10 md:px-10 md:py-14">
-        <header className="mb-16">
-          <div className="mb-8 flex items-center justify-between">
-            <div className="text-sm font-semibold tracking-tight">
+    <div className="min-h-screen bg-page text-ink">
+      {/* Masthead */}
+      <div className="bg-ink text-page">
+        <header className="mx-auto flex min-h-[72px] max-w-[1180px] flex-wrap items-center justify-between gap-x-8 gap-y-3 px-5 py-4 md:px-10">
+          <a href="#top" className="flex items-baseline gap-3.5 text-page no-underline">
+            <span className="font-serif text-[22px] font-semibold tracking-[0.01em] md:text-[28px]">
               AI Marketing Research Agent
-            </div>
-
-            <div className="rounded-full border border-black/10 bg-white px-4 py-2 text-xs font-medium">
-              Powered by LangGraph
-            </div>
-          </div>
-
-          <div className="max-w-4xl">
-            <p className="mb-5 text-sm font-medium uppercase tracking-[0.2em] text-black/50">
-              AI-powered research
-            </p>
-
-            <h1 className="text-5xl font-semibold leading-[0.95] tracking-[-0.04em] md:text-7xl">
-              Turn a marketing question into actionable research.
-            </h1>
-
-            <p className="mt-7 max-w-2xl text-lg leading-8 text-black/60">
-              Ask a question and the agent searches the live web, analyzes
-              the findings, and produces a structured marketing research
-              report.
-            </p>
-          </div>
+            </span>
+          </a>
+          <nav aria-label="Main" className="flex flex-wrap items-center gap-x-8 gap-y-2 text-xs uppercase tracking-[0.2em]">
+            <a href="#method" className="text-[#D9CBB4] transition hover:text-page">
+              Method
+            </a>
+            <button
+              type="button"
+              onClick={openProfileFromNav}
+              className="min-h-11 border-b border-gold pb-0.5 uppercase tracking-[0.2em] text-page"
+            >
+              Business profile
+            </button>
+          </nav>
         </header>
+      </div>
 
-        <section className="mb-6 rounded-3xl border border-black/10 bg-white p-5 md:p-7">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <p className="text-sm font-semibold">Business profile</p>
-              <p className="mt-1 text-sm text-black/45">
-                {savedProfile
-                  ? `Saved: ${profileName}. Tick "Tailor" below to use it for a question.`
-                  : "Optional. Add your business once to get research tailored to it."}
-              </p>
+      <main id="top" className="mx-auto w-full max-w-[1180px] px-5 pb-24 md:px-10">
+        {/* Hero */}
+        <section className="flex flex-wrap gap-x-[72px] gap-y-10 border-b border-rule pb-12 pt-14 md:pb-14 md:pt-[88px]">
+          <div className="min-w-0 flex-[999_1_520px]">
+            <p className="eyebrow mb-6 text-gold-deep md:mb-7">Research you can verify</p>
+            <h1 className="font-serif text-[52px] font-medium leading-[0.98] tracking-[-0.015em] sm:text-[64px] md:text-[84px]">
+              Know your market.
+              <br />
+              <span className="italic text-gold-text">Prove</span> every claim.
+            </h1>
+          </div>
+          <div className="flex min-w-0 flex-[1_1_300px] flex-col justify-end gap-7">
+            <p className="text-[17px] leading-[1.7] text-muted">
+              Competitors, prices, customers and keywords, researched across the live web.
+              Every finding is tied to its source and graded for how far it can be trusted.
+            </p>
+            <ol className="border-t border-rule">
+              {[
+                ["i.", "Research a question"],
+                ["ii.", "Tear down up to three competitors"],
+                ["iii.", "Turn findings into briefs, ads and plans"],
+              ].map(([numeral, text]) => (
+                <li key={numeral} className="flex gap-[18px] border-b border-rule-soft py-3 text-sm text-muted">
+                  <span className="w-6 font-serif text-lg italic text-gold-text">{numeral}</span>
+                  {text}
+                </li>
+              ))}
+            </ol>
+          </div>
+        </section>
+
+        {/* The writing surface */}
+        <section ref={deskRef} aria-label="Start your research" className="scroll-mt-6 pb-6 pt-12 md:pt-14">
+          <div className="flex flex-wrap items-baseline justify-between gap-4">
+            <div role="tablist" aria-label="What do you want to do?" className="flex flex-wrap gap-x-6 gap-y-2 sm:gap-x-9">
+              {(
+                [
+                  ["research", "Research question"],
+                  ["teardown", "Competitor teardown"],
+                ] as [Mode, string][]
+              ).map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  role="tab"
+                  aria-selected={mode === value}
+                  onClick={() => switchMode(value)}
+                  className={`eyebrow min-h-11 border-b-2 text-[11px] tracking-[0.18em] transition sm:text-xs sm:tracking-[0.26em] ${
+                    mode === value
+                      ? "border-ink font-semibold text-ink"
+                      : "border-transparent text-faint hover:text-ink"
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
             </div>
 
             <button
               type="button"
               onClick={toggleProfilePanel}
-              className="shrink-0 rounded-full border border-black/10 bg-white px-5 py-2.5 text-sm font-semibold transition hover:border-black/30"
+              aria-expanded={profileOpen}
+              className="min-h-11 text-left text-sm text-muted"
             >
-              {profileOpen ? "Close" : savedProfile ? "Edit profile" : "Add profile"}
+              {savedProfile ? (
+                <>
+                  Business profile{" "}
+                  <span className="font-serif text-xl italic text-ink">{profileName}</span>{" "}
+                  <span className="link-quiet ml-1.5 text-xs uppercase tracking-[0.16em]">
+                    {profileOpen ? "Close" : "Edit"}
+                  </span>
+                </>
+              ) : (
+                <span className="link-quiet text-xs uppercase tracking-[0.16em]">
+                  {profileOpen ? "Close profile" : "Add your business profile"}
+                </span>
+              )}
             </button>
           </div>
 
           {profileOpen && (
-            <div className="mt-6">
-              <div className="grid gap-4 md:grid-cols-2">
+            <div className="mt-6 border border-rule bg-paper p-6 md:p-10">
+              <div className="flex flex-wrap items-baseline justify-between gap-3">
+                <h2 className="font-serif text-[28px] font-medium leading-tight">Your business profile</h2>
+                <p className="text-sm text-faint">Optional. Fill in only what you want to share.</p>
+              </div>
+              <div className="mt-6 grid gap-x-10 gap-y-6 md:grid-cols-2">
                 {PROFILE_FIELDS.map((field) => (
                   <label
                     key={field.key}
                     className={`block ${field.wide ? "md:col-span-2" : ""}`}
                   >
-                    <span className="mb-1.5 block text-xs font-semibold uppercase tracking-[0.12em] text-black/45">
+                    <span className="eyebrow block text-[11px] text-faint">
                       {field.label}
                     </span>
                     <input
@@ -368,32 +484,24 @@ export default function Home() {
                           [field.key]: event.target.value,
                         }))
                       }
-                      className="w-full rounded-xl border border-black/10 bg-[#fafafa] px-4 py-3 text-sm outline-none transition focus:border-black/30 focus:bg-white"
+                      className="field"
                     />
                   </label>
                 ))}
               </div>
 
-              <div className="mt-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                <p className="text-xs text-black/40">
+              <div className="mt-8 flex flex-col gap-4 border-t border-rule-soft pt-6 sm:flex-row sm:items-center sm:justify-between">
+                <p className="text-sm text-faint">
                   Saved only in this browser. It is sent with a question only when you tick
                   &ldquo;Tailor&rdquo;.
                 </p>
                 <div className="flex gap-3">
                   {savedProfile && (
-                    <button
-                      type="button"
-                      onClick={clearProfile}
-                      className="rounded-full border border-black/10 px-5 py-2.5 text-sm font-semibold text-black/60 transition hover:border-black/30"
-                    >
+                    <button type="button" onClick={clearProfile} className="btn-secondary">
                       Clear
                     </button>
                   )}
-                  <button
-                    type="button"
-                    onClick={saveProfile}
-                    className="rounded-full bg-black px-6 py-2.5 text-sm font-semibold text-white transition hover:bg-black/80"
-                  >
+                  <button type="button" onClick={saveProfile} className="btn-primary min-h-12">
                     Save profile
                   </button>
                 </div>
@@ -402,252 +510,221 @@ export default function Home() {
           )}
 
           {profileNotice && (
-            <p className="mt-4 text-sm text-black/55">{profileNotice}</p>
+            <p className="mt-4 text-sm text-muted" role="status">{profileNotice}</p>
           )}
-        </section>
-
-        <section className="rounded-3xl border border-black/10 bg-white p-5 shadow-sm md:p-7">
-          <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div
-              role="tablist"
-              aria-label="What do you want to do?"
-              className="inline-flex self-start rounded-full bg-black/[0.05] p-1"
-            >
-              {(
-                [
-                  ["research", "Research question"],
-                  ["teardown", "Competitor teardown"],
-                ] as [Mode, string][]
-              ).map(([value, label]) => (
-                <button
-                  key={value}
-                  type="button"
-                  role="tab"
-                  aria-selected={mode === value}
-                  onClick={() => switchMode(value)}
-                  className={`rounded-full px-4 py-2 text-sm font-semibold transition ${
-                    mode === value ? "bg-white text-black shadow-sm" : "text-black/50 hover:text-black"
-                  }`}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-
-            {mode === "research" && (
-              <span className="text-xs text-black/40">
-                ⌘ + Enter to research
-              </span>
-            )}
-          </div>
 
           {mode === "research" ? (
             <>
-              <label htmlFor="question" className="sr-only">
-                Research question
+              <label htmlFor="question" className="eyebrow mt-7 block text-faint">
+                Your question
               </label>
               <textarea
                 id="question"
+                ref={questionRef}
+                rows={2}
                 value={question}
                 onChange={(event) => setQuestion(event.target.value)}
                 onKeyDown={handleKeyDown}
                 maxLength={2000}
-                placeholder="e.g. What are the biggest SEO opportunities for Nigerian beauty businesses in 2026?"
-                className="min-h-[170px] w-full resize-none rounded-2xl border border-black/10 bg-[#fafafa] p-5 text-base outline-none transition focus:border-black/30 focus:bg-white"
+                placeholder="What would you like to know about your market?"
+                className="mt-2.5 block min-h-[96px] w-full resize-none border-0 border-b border-ink bg-transparent pb-4 pt-2 font-serif text-[26px] italic leading-[1.25] text-ink outline-none placeholder:text-[#a8967f] focus:border-gold-text md:text-[34px]"
               />
             </>
           ) : (
-            <div>
-              <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                <p className="text-sm text-black/55">
-                  Up to {MAX_COMPETITORS} competitors. Paste a website if you know it, or just the name.
+            <div className="mt-7">
+              <div className="mb-2 flex flex-col gap-2 sm:flex-row sm:items-baseline sm:justify-between">
+                <p className="eyebrow text-faint">
+                  Up to {MAX_COMPETITORS} competitors
                 </p>
                 {savedProfile?.competitors.trim() && (
                   <button
                     type="button"
                     onClick={fillCompetitorsFromProfile}
-                    className="self-start text-sm font-semibold text-black/70 underline decoration-black/20 underline-offset-4 hover:text-black"
+                    className="link-quiet self-start text-sm"
                   >
                     Use competitors from my profile
                   </button>
                 )}
               </div>
-              <div className="grid gap-3 md:grid-cols-3">
+              <div className="grid gap-x-8 gap-y-2 md:grid-cols-3">
                 {competitorInputs.map((value, index) => (
-                  <input
-                    key={index}
-                    type="text"
-                    value={value}
-                    maxLength={200}
-                    aria-label={`Competitor ${index + 1}`}
-                    placeholder={["e.g. acme.com", "e.g. Beta Clinic", "Optional third competitor"][index]}
-                    onChange={(event) =>
-                      setCompetitorInputs((inputs) =>
-                        inputs.map((v, i) => (i === index ? event.target.value : v)),
-                      )
-                    }
-                    className="w-full rounded-xl border border-black/10 bg-[#fafafa] px-4 py-3 text-sm outline-none transition focus:border-black/30 focus:bg-white"
-                  />
+                  <div key={index} className="flex items-baseline gap-3">
+                    <span className="font-serif text-xl italic text-gold-text">
+                      {["i.", "ii.", "iii."][index]}
+                    </span>
+                    <input
+                      type="text"
+                      value={value}
+                      maxLength={200}
+                      aria-label={`Competitor ${index + 1}`}
+                      placeholder={["Website or name", "Website or name", "Optional"][index]}
+                      onChange={(event) =>
+                        setCompetitorInputs((inputs) =>
+                          inputs.map((v, i) => (i === index ? event.target.value : v)),
+                        )
+                      }
+                      className="field border-ink font-serif text-[22px] italic"
+                    />
+                  </div>
                 ))}
               </div>
-              <input
-                type="text"
-                value={focus}
-                maxLength={500}
-                aria-label="What do you most want to know? (optional)"
-                placeholder="Optional: what do you most want to know? e.g. how they price their packages"
-                onChange={(event) => setFocus(event.target.value)}
-                className="mt-3 w-full rounded-xl border border-black/10 bg-[#fafafa] px-4 py-3 text-sm outline-none transition focus:border-black/30 focus:bg-white"
-              />
+              <label className="mt-6 block">
+                <span className="eyebrow block text-[11px] text-faint">
+                  What do you most want to know? (optional)
+                </span>
+                <input
+                  type="text"
+                  value={focus}
+                  maxLength={500}
+                  placeholder="e.g. how they price their packages"
+                  onChange={(event) => setFocus(event.target.value)}
+                  className="field"
+                />
+              </label>
             </div>
           )}
 
-          <div className="mt-5 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-            <label
-              className={`flex items-center gap-3 text-sm ${
-                savedProfile ? "cursor-pointer text-black/70" : "cursor-not-allowed text-black/35"
-              }`}
-            >
-              <input
-                type="checkbox"
-                checked={useProfile && !!savedProfile}
-                disabled={!savedProfile}
-                onChange={(event) => setUseProfile(event.target.checked)}
-                className="h-4 w-4 accent-black"
-              />
-              {savedProfile
-                ? `Tailor this research to ${profileName}`
-                : "Tailor to my business (add a profile first)"}
-            </label>
+          <div className="mt-6 flex flex-col gap-5 sm:flex-row sm:items-center sm:justify-between">
+            <div className="space-y-2">
+              <label
+                className={`flex min-h-11 items-center gap-3 text-sm ${
+                  savedProfile ? "cursor-pointer text-muted" : "cursor-not-allowed text-faint"
+                }`}
+              >
+                <input
+                  type="checkbox"
+                  checked={useProfile && !!savedProfile}
+                  disabled={!savedProfile}
+                  onChange={(event) => setUseProfile(event.target.checked)}
+                  className="h-4 w-4 rounded-none accent-[#2a1c13]"
+                />
+                {savedProfile ? (
+                  <span>
+                    Tailor this to{" "}
+                    <span className="font-serif text-lg italic text-ink">{profileName}</span>
+                  </span>
+                ) : (
+                  "Tailor to my business (add a profile first)"
+                )}
+              </label>
+              <p className="text-sm text-faint">
+                {mode === "teardown"
+                  ? "Reads each competitor's own website. Nothing is invented."
+                  : "Several focused searches and a careful read of each page. Nothing is invented."}
+                {mode === "research" && (
+                  <span className="hidden md:inline"> Press ⌘/Ctrl + Enter to start.</span>
+                )}
+              </p>
+            </div>
 
             <button
+              type="button"
               onClick={handleResearch}
               disabled={loading}
-              className="rounded-full bg-black px-7 py-3.5 text-sm font-semibold text-white transition hover:bg-black/80 disabled:cursor-not-allowed disabled:opacity-50"
+              className="btn-primary min-h-14 px-9 text-[13px]"
             >
               {loading
                 ? mode === "teardown"
-                  ? "Comparing..."
-                  : "Researching..."
+                  ? "Comparing…"
+                  : "Researching…"
                 : mode === "teardown"
                   ? "Compare competitors"
-                  : "Research"}
+                  : "Begin research"}
+              {!loading && <span aria-hidden="true" className="text-gold">→</span>}
             </button>
           </div>
 
-          {error && (
-            <div className="mt-5 rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
-              {error}
-            </div>
-          )}
+          {error && <ErrorNote message={error} />}
+        </section>
+
+        {/* Or begin with */}
+        <section
+          aria-label="Or begin with"
+          className="mt-4 flex flex-wrap items-stretch border-y border-rule"
+        >
+          <p className="w-full py-4 font-serif text-xl italic text-gold-deep md:w-auto md:flex-none md:py-[22px] md:pr-7">
+            Or begin with
+          </p>
+          {starterQuestions(savedProfile).map((starter) => (
+            <button
+              key={starter.label}
+              type="button"
+              onClick={() => applyStarter(starter.question)}
+              className="flex min-h-11 flex-[1_1_200px] items-center justify-between gap-3 border-t border-rule-soft px-0 py-4 text-left text-[15px] text-ink transition hover:bg-paper md:border-l md:border-t-0 md:px-6 md:py-[22px]"
+            >
+              {starter.label} <span aria-hidden="true" className="text-gold-text">→</span>
+            </button>
+          ))}
         </section>
 
         {loading && (
-          <section className="mt-10 rounded-3xl border border-black/10 bg-white p-8">
-            <div className="flex items-center gap-3">
-              <div className="h-3 w-3 animate-pulse rounded-full bg-black" />
-              <p className="text-sm text-black/60">
-                {mode === "teardown"
-                  ? "Finding each competitor's website and reading their pages..."
-                  : "Searching the web and analyzing the research..."}
-              </p>
+          <section aria-live="polite" className="mt-16 border border-rule bg-paper p-8 md:p-12">
+            <p className="eyebrow font-semibold text-ink">Research in progress</p>
+            <p className="mt-4 font-serif text-[28px] italic leading-snug text-ink md:text-[34px]">
+              {mode === "teardown"
+                ? "Finding each competitor’s website and reading their pages…"
+                : "Searching the web, reading each page and checking every figure…"}
+            </p>
+            <div className="mt-8 h-px w-full overflow-hidden bg-rule">
+              <div className="progress-bar h-px w-2/5 bg-gold-text" />
             </div>
+            <p className="mt-4 text-sm text-faint">This usually takes a minute or two.</p>
           </section>
         )}
 
         {report && !loading && (
-          <section className="mt-10 space-y-6">
-            <div className="rounded-3xl border border-black/10 bg-white p-7 md:p-9">
-              <p className="mb-3 text-xs font-semibold uppercase tracking-[0.18em] text-black/40">
-                Research question
-              </p>
+          <section aria-label="Research memorandum" className="mt-16">
+            <Memorandum
+              kind="Research memorandum"
+              title={report.question}
+              preparedFor={tailoredTo}
+              date={reportDate}
+              sourceCount={report.sources.length}
+            >
+              <EvidenceLedger findings={report.key_findings} />
 
-              <h2 className="text-2xl font-semibold tracking-tight">
-                {report.question}
-              </h2>
+              <MemoSection title="Summary">
+                <Summary text={report.summary} />
+              </MemoSection>
 
-              {tailoredTo && (
-                <p className="mt-3 text-sm text-black/50">
-                  Tailored to: {tailoredTo}
-                </p>
+              <MemoSection title="Findings">
+                <Ledger items={report.key_findings} />
+              </MemoSection>
+
+              {report.opportunities.length > 0 && (
+                <MemoSection title="Opportunities">
+                  <Ledger items={report.opportunities} />
+                </MemoSection>
               )}
-            </div>
 
-            <div className="rounded-3xl border border-black/10 bg-white p-7 md:p-9">
-              <p className="mb-4 text-xs font-semibold uppercase tracking-[0.18em] text-black/40">
-                Summary
-              </p>
+              {report.recommendations.length > 0 && (
+                <MemoSection title="Recommendations">
+                  <Ledger items={report.recommendations} />
+                </MemoSection>
+              )}
 
-              <div className="max-w-4xl space-y-5 text-lg leading-8 text-black/70">
-                {report.summary.split(/\n\s*\n/).map((paragraph, index) => (
-                  <p key={index}>{paragraph}</p>
-                ))}
-              </div>
-            </div>
-
-            <div className="grid gap-6 md:grid-cols-2">
-              <ReportSection
-                title="Key Findings"
-                items={report.key_findings}
+              <DeliverablePanel
+                source={{
+                  question: report.question,
+                  summary: report.summary,
+                  key_findings: report.key_findings,
+                  opportunities: report.opportunities,
+                  recommendations: report.recommendations,
+                }}
+                profile={tailoredTo ? savedProfile : null}
               />
 
-              <ReportSection
-                title="Opportunities"
-                items={report.opportunities}
-              />
-
-              <ReportSection
-                title="Recommendations"
-                items={report.recommendations}
-              />
-
-              <div className="rounded-3xl border border-black/10 bg-white p-7">
-                <p className="mb-5 text-xs font-semibold uppercase tracking-[0.18em] text-black/40">
-                  Sources
-                </p>
-
-                <ol className="space-y-4">
-                  {report.sources.map((source, index) => (
-                    <li key={`${source}-${index}`} className="flex gap-3 text-sm leading-6">
-                      <span className="shrink-0 font-semibold text-black/50">
-                        [{index + 1}]
-                      </span>
-                      <a
-                        href={source}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="min-w-0 text-black/60 transition hover:text-black"
-                      >
-                        <span className="block font-medium text-black/80">
-                          {siteName(source)}
-                        </span>
-                        <span className="block break-all text-xs text-black/40 underline decoration-black/20 underline-offset-4">
-                          {source}
-                        </span>
-                      </a>
-                    </li>
-                  ))}
-                </ol>
-              </div>
-            </div>
-
-            <DeliverablePanel
-              source={{
-                question: report.question,
-                summary: report.summary,
-                key_findings: report.key_findings,
-                opportunities: report.opportunities,
-                recommendations: report.recommendations,
-              }}
-              profile={tailoredTo ? savedProfile : null}
-            />
+              <SourceList title="Sources" sources={report.sources} />
+            </Memorandum>
 
             <button
+              type="button"
               onClick={() => {
                 setReport(null);
                 setQuestion("");
+                deskRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
               }}
-              className="rounded-full border border-black/10 bg-white px-6 py-3 text-sm font-semibold transition hover:border-black/30"
+              className="btn-secondary mt-8"
             >
               Start new research
             </button>
@@ -658,50 +735,266 @@ export default function Home() {
           <TeardownView
             teardown={teardown}
             tailoredTo={tailoredTo}
+            date={reportDate}
             profile={tailoredTo ? savedProfile : null}
             onReset={() => {
               setTeardown(null);
               setCompetitorInputs(["", "", ""]);
               setFocus("");
+              deskRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
             }}
           />
         )}
-      </div>
-    </main>
-  );
-}
 
-function ReportSection({
-  title,
-  items,
-}: {
-  title: string;
-  items: string[];
-}) {
-  return (
-    <div className="rounded-3xl border border-black/10 bg-white p-7">
-      <p className="mb-5 text-xs font-semibold uppercase tracking-[0.18em] text-black/40">
-        {title}
-      </p>
+        {/* Method */}
+        <section id="method" aria-label="Method" className="mt-24 flex scroll-mt-6 flex-wrap gap-x-16 gap-y-10">
+          <div className="flex-[1_1_260px]">
+            <p className="eyebrow mb-4 text-gold-deep">The method</p>
+            <h2 className="font-serif text-[40px] font-medium leading-[1.05] md:text-[44px]">
+              Three steps, <span className="italic">no shortcuts.</span>
+            </h2>
+          </div>
+          <div className="grid flex-[999_1_600px] gap-8 [grid-template-columns:repeat(auto-fit,minmax(200px,1fr))]">
+            {[
+              ["I.", "Search", "Focused searches for every part of your question, worded the way real pages are written."],
+              ["II.", "Read", "The pages themselves, not search snippets. Competitors’ own sites included."],
+              ["III.", "Verify", "Every figure checked against its source. What cannot be established is said plainly."],
+            ].map(([numeral, name, text]) => (
+              <div key={numeral} className="border-t border-gold pt-5">
+                <p className="font-serif text-[22px] italic text-gold-text">{numeral}</p>
+                <p className="mt-2.5 font-serif text-[26px] font-semibold">{name}</p>
+                <p className="mt-2 text-[15px] leading-[1.65] text-muted">{text}</p>
+              </div>
+            ))}
+          </div>
+        </section>
 
-      <ol className="space-y-5">
-        {items.map((item, index) => (
-          <li
-            key={`${item}-${index}`}
-            className="flex gap-4 text-sm leading-7 text-black/70"
-          >
-            <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-black text-xs font-semibold text-white">
-              {index + 1}
-            </span>
-
-            <ReportItem text={item} />
-          </li>
-        ))}
-      </ol>
+        <footer className="mt-20 flex flex-wrap justify-between gap-x-8 gap-y-3 border-t border-rule pt-6 text-xs uppercase tracking-[0.12em] text-faint">
+          <span className="font-serif text-xl normal-case tracking-[0.01em] text-ink">
+            AI Marketing Research Agent
+          </span>
+          <span>Evidence · Vendor claim · Inference · Not established</span>
+        </footer>
+      </main>
     </div>
   );
 }
 
+/* ---------- Report building blocks ---------- */
+
+function ErrorNote({ message }: { message: string }) {
+  return (
+    <div role="alert" className="mt-6 border-l-2 border-[#8a2a1a] bg-[#fbf0ea] px-5 py-4 text-sm text-[#7a2416]">
+      {message}
+    </div>
+  );
+}
+
+function Memorandum({
+  kind,
+  title,
+  preparedFor,
+  date,
+  sourceCount,
+  sourceLabel = "Sources cited",
+  children,
+}: {
+  kind: string;
+  title: string;
+  preparedFor: string;
+  date: string;
+  sourceCount: number;
+  sourceLabel?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <article className="border border-rule bg-paper px-5 pb-10 pt-8 sm:px-8 md:px-[72px] md:pb-14 md:pt-16">
+      <header className="flex flex-wrap justify-between gap-x-10 gap-y-4 border-b border-ink pb-7">
+        <p className="eyebrow font-semibold text-ink">{kind}</p>
+        <dl className="flex flex-wrap gap-x-8 gap-y-1.5 text-[13px] text-muted">
+          {preparedFor && <MetaItem term="Prepared for" value={preparedFor} />}
+          {date && <MetaItem term="Date" value={date} />}
+          <MetaItem term={sourceLabel} value={String(sourceCount)} />
+        </dl>
+      </header>
+      <h2 className="mt-8 max-w-[900px] break-words font-serif text-[32px] font-medium leading-[1.1] md:mt-10 md:text-[46px] md:leading-[1.08]">
+        {title}
+      </h2>
+      {children}
+    </article>
+  );
+}
+
+function MetaItem({ term, value }: { term: string; value: string }) {
+  return (
+    <div className="flex gap-2">
+      <dt className="pt-0.5 text-[11px] uppercase tracking-[0.16em] text-faint">{term}</dt>
+      <dd>{value}</dd>
+    </div>
+  );
+}
+
+function MemoSection({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div className="mt-12 flex flex-wrap gap-x-16 gap-y-5 md:mt-[52px]">
+      <h3 className="eyebrow flex-[1_1_180px] text-gold-deep">{title}</h3>
+      <div className="min-w-0 flex-[999_1_560px]">{children}</div>
+    </div>
+  );
+}
+
+/** Turn footnote marks like [3] or [1][2] into superscript links to the source list. */
+function withFootnotes(text: string): React.ReactNode[] {
+  return text.split(/((?:\[\d+\])+)/g).map((part, index) => {
+    const numbers = part.match(/^(?:\[\d+\])+$/) ? part.match(/\d+/g) ?? [] : [];
+    if (numbers.length === 0) {
+      return part;
+    }
+    return (
+      <sup key={index} className="ml-0.5 text-[0.7em] font-semibold">
+        {numbers.map((n, i) => (
+          <span key={n + i}>
+            {i > 0 && ","}
+            <a href={`#source-${n}`} className="text-gold-text no-underline hover:text-ink">
+              {n}
+            </a>
+          </span>
+        ))}
+      </sup>
+    );
+  });
+}
+
+function Summary({ text }: { text: string }) {
+  return (
+    <div className="space-y-4 text-[17px] leading-[1.75] text-[#3a2a1e] md:text-lg">
+      {text.split(/\n\s*\n/).map((paragraph, index) => (
+        <p
+          key={index}
+          className={
+            index === 0 && paragraph.length > 160
+              ? "first-letter:float-left first-letter:mr-3 first-letter:mt-1.5 first-letter:font-serif first-letter:text-[72px] first-letter:leading-[0.78] first-letter:text-gold-text"
+              : undefined
+          }
+        >
+          {withFootnotes(paragraph)}
+        </p>
+      ))}
+    </div>
+  );
+}
+
+type Marker = "solid" | "wide" | "outline" | "soft" | "dashed" | "none";
+
+/** How each backend label is marked. Labels can carry a qualifier after " – ". */
+function markerFor(label: string): Marker {
+  const main = label.split(" – ")[0].toLowerCase();
+  if (main.startsWith("evidence")) {
+    return label.includes(" – ") ? "wide" : "solid";
+  }
+  if (main.startsWith("vendor claim")) return "outline";
+  if (main.startsWith("inference")) return "soft";
+  if (main.startsWith("social post") || main.startsWith("uploaded document") || main.startsWith("weakly supported")) {
+    return "outline";
+  }
+  if (main.startsWith("not established") || main.startsWith("untested idea")) return "dashed";
+  return "none";
+}
+
+function MarkerSquare({ marker }: { marker: Marker }) {
+  const style: Record<Marker, string> = {
+    solid: "h-2 w-2 bg-ink",
+    wide: "h-2 w-2 bg-gold-text",
+    outline: "h-1.5 w-1.5 border border-gold-text",
+    soft: "h-2 w-2 bg-tan",
+    dashed: "h-1.5 w-1.5 border border-dashed border-quiet",
+    none: "hidden",
+  };
+  return <span aria-hidden="true" className={`mr-2 inline-block align-[1px] ${style[marker]}`} />;
+}
+
+function splitLabel(text: string): { label: string; body: string } {
+  const match = text.match(/^\[([^\]]+)\]\s*/);
+  return match ? { label: match[1], body: text.slice(match[0].length) } : { label: "", body: text };
+}
+
+function Ledger({ items }: { items: string[] }) {
+  const parsed = items.map(splitLabel);
+  const anyLabel = parsed.some((item) => item.label);
+  return (
+    <ol className="border-t border-ink">
+      {parsed.map(({ label, body }, index) => {
+        const [main, qualifier] = label.split(" – ");
+        const marker = markerFor(label);
+        const muted = marker === "dashed";
+        return (
+          <li
+            key={`${body}-${index}`}
+            className="flex flex-wrap gap-x-6 gap-y-2 border-b border-rule-soft py-5"
+          >
+            <span className="w-8 font-serif text-[22px] leading-7 text-gold-text lining-nums">
+              {String(index + 1).padStart(2, "0")}
+            </span>
+            {anyLabel && (
+              <span className="w-[150px] pt-1">
+                {label && (
+                  <span
+                    className={`block text-[11px] font-semibold uppercase leading-5 tracking-[0.18em] ${
+                      marker === "solid" ? "text-ink" : marker === "outline" || marker === "wide" ? "text-gold-deep" : "text-quiet"
+                    }`}
+                  >
+                    <MarkerSquare marker={marker} />
+                    {main}
+                  </span>
+                )}
+                {qualifier && (
+                  <span className="mt-1 block text-xs leading-4 text-faint">{qualifier}</span>
+                )}
+              </span>
+            )}
+            <span
+              className={`min-w-0 flex-[1_1_280px] break-words leading-[1.65] ${muted ? "text-muted" : "text-ink"}`}
+            >
+              {withFootnotes(body)}
+            </span>
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
+function EvidenceLedger({ findings }: { findings: string[] }) {
+  const labels = findings.map((f) => splitLabel(f).label.toLowerCase());
+  const count = (prefix: string) => labels.filter((l) => l.startsWith(prefix)).length;
+  const cells: { value: number; label: string; marker: Marker }[] = [
+    { value: findings.length, label: "Findings", marker: "none" },
+    { value: count("evidence"), label: "Independent evidence", marker: "solid" },
+    { value: count("vendor claim"), label: "Vendor claims", marker: "outline" },
+    { value: count("not established"), label: "Not established", marker: "dashed" },
+  ];
+  return (
+    <div
+      aria-label="Evidence overview"
+      className="mt-10 grid grid-cols-2 border-y border-rule md:grid-cols-4"
+    >
+      {cells.map((cell, index) => (
+        <div
+          key={cell.label}
+          className={`py-5 pr-4 ${index % 2 === 1 ? "border-l border-rule-soft pl-4 md:pl-5" : ""} ${
+            index === 2 ? "border-t border-rule-soft md:border-l md:border-t-0 md:pl-5" : ""
+          } ${index === 3 ? "border-t border-rule-soft md:border-t-0" : ""}`}
+        >
+          <p className="font-serif text-[44px] leading-none lining-nums">{cell.value}</p>
+          <p className="mt-2 text-[11px] uppercase tracking-[0.2em] text-faint">
+            <MarkerSquare marker={cell.marker} />
+            {cell.label}
+          </p>
+        </div>
+      ))}
+    </div>
+  );
+}
 
 function siteName(url: string) {
   try {
@@ -711,20 +1004,37 @@ function siteName(url: string) {
   }
 }
 
-function ReportItem({ text }: { text: string }) {
-  const match = text.match(/^\[([^\]]+)\]\s*/);
-
-  if (!match) {
-    return <span>{text}</span>;
+function SourceList({ title, sources }: { title: string; sources: string[] }) {
+  if (sources.length === 0) {
+    return null;
   }
-
   return (
-    <span>
-      <span className="mr-2 inline-block rounded-full bg-black/[0.06] px-2.5 py-0.5 text-[11px] font-medium uppercase tracking-wide text-black/50">
-        {match[1]}
-      </span>
-      {text.slice(match[0].length)}
-    </span>
+    <MemoSection title={title}>
+      <ol className="space-y-3 text-[13px] leading-6 text-quiet">
+        {sources.map((source, index) => (
+          <li
+            key={`${source}-${index}`}
+            id={`source-${index + 1}`}
+            className="flex scroll-mt-6 gap-3"
+          >
+            <span className="w-6 shrink-0 font-serif text-base text-gold-text lining-nums">{index + 1}.</span>
+            <a
+              href={source}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="group min-w-0"
+            >
+              <span className="block font-medium text-ink group-hover:text-gold-deep">
+                {siteName(source)}
+              </span>
+              <span className="block break-all text-xs text-faint underline decoration-rule underline-offset-4">
+                {source}
+              </span>
+            </a>
+          </li>
+        ))}
+      </ol>
+    </MemoSection>
   );
 }
 
@@ -739,172 +1049,150 @@ const TEARDOWN_ROWS: { key: keyof CompetitorCard; label: string }[] = [
 function TeardownView({
   teardown,
   tailoredTo,
+  date,
   profile,
   onReset,
 }: {
   teardown: Teardown;
   tailoredTo: string;
+  date: string;
   profile: Profile | null;
   onReset: () => void;
 }) {
   return (
-    <section className="mt-10 space-y-6">
-      <div className="rounded-3xl border border-black/10 bg-white p-7 md:p-9">
-        <p className="mb-3 text-xs font-semibold uppercase tracking-[0.18em] text-black/40">
-          Competitor teardown
-        </p>
-        <h2 className="text-2xl font-semibold tracking-tight">
-          {teardown.competitors.map((c) => c.name).join(" vs ")}
-        </h2>
-        {tailoredTo && (
-          <p className="mt-3 text-sm text-black/50">Tailored to: {tailoredTo}</p>
-        )}
-        <div className="mt-6 max-w-4xl space-y-5 text-lg leading-8 text-black/70">
-          {teardown.summary.split(/\n\s*\n/).map((paragraph, index) => (
-            <p key={index}>{paragraph}</p>
-          ))}
-        </div>
-      </div>
+    <section aria-label="Competitor teardown" className="mt-16">
+      <Memorandum
+        kind="Competitor teardown"
+        title={teardown.competitors.map((c) => c.name).join(" vs ")}
+        preparedFor={tailoredTo}
+        date={date}
+        sourceCount={teardown.sources.length}
+        sourceLabel="Pages read"
+      >
+        <MemoSection title="Summary">
+          <Summary text={teardown.summary} />
+        </MemoSection>
 
-      <div className="rounded-3xl border border-black/10 bg-white p-5 md:p-7">
-        <p className="mb-5 text-xs font-semibold uppercase tracking-[0.18em] text-black/40">
-          Side by side
-        </p>
-        {/* Phones: one card per competitor */}
-        <div className="space-y-4 md:hidden">
-          {teardown.competitors.map((c) => (
-            <div key={c.name} className="rounded-2xl border border-black/[0.07] p-4">
-              <p className="text-base font-semibold">{c.name}</p>
-              <p className="mb-3 text-xs text-black/45">{c.website || "Website not found"}</p>
-              <dl className="space-y-3 text-sm">
-                {TEARDOWN_ROWS.map((row) => {
-                  const value = String(c[row.key]);
-                  return (
-                    <div key={row.key}>
-                      <dt className="text-[11px] font-semibold uppercase tracking-[0.12em] text-black/40">
-                        {row.label}
-                      </dt>
-                      <dd className={value.startsWith("Not found") ? "italic text-black/35" : "text-black/75"}>
-                        {value}
-                      </dd>
-                    </div>
-                  );
-                })}
-                {c.note && <p className="text-xs leading-5 text-black/45">{c.note}</p>}
-              </dl>
-            </div>
-          ))}
-        </div>
-
-        {/* Larger screens: side-by-side table */}
-        <div className="hidden overflow-x-auto md:block">
-          <table className="w-full min-w-[640px] border-collapse text-left text-sm">
-            <thead>
-              <tr>
-                <th className="w-40 pb-4 pr-4 align-bottom text-xs font-semibold uppercase tracking-[0.12em] text-black/40" />
-                {teardown.competitors.map((c) => (
-                  <th key={c.name} className="pb-4 pr-4 align-bottom">
-                    <span className="block text-base font-semibold text-black">{c.name}</span>
-                    {c.website ? (
-                      <a
-                        href={`https://${c.website}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-xs font-normal text-black/45 underline decoration-black/20 underline-offset-4 hover:text-black"
-                      >
-                        {c.website}
-                      </a>
-                    ) : (
-                      <span className="text-xs font-normal text-black/40">Website not found</span>
-                    )}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {TEARDOWN_ROWS.map((row) => (
-                <tr key={row.key} className="border-t border-black/[0.07]">
-                  <th className="py-4 pr-4 align-top text-xs font-semibold uppercase tracking-[0.12em] text-black/45">
-                    {row.label}
-                  </th>
-                  {teardown.competitors.map((c) => {
+        <MemoSection title="Side by side">
+          {/* Phones: one block per competitor */}
+          <div className="space-y-8 md:hidden">
+            {teardown.competitors.map((c) => (
+              <div key={c.name} className="border-t border-ink pt-4">
+                <p className="font-serif text-2xl font-semibold">{c.name}</p>
+                <p className="mb-3 text-xs text-faint">{c.website || "Website not found"}</p>
+                <dl className="text-sm">
+                  {TEARDOWN_ROWS.map((row) => {
                     const value = String(c[row.key]);
-                    const missing = value.startsWith("Not found");
                     return (
-                      <td
-                        key={c.name}
-                        className={`py-4 pr-4 align-top leading-6 ${missing ? "text-black/35 italic" : "text-black/75"}`}
-                      >
-                        {value}
-                      </td>
+                      <div key={row.key} className="border-b border-rule-soft py-3">
+                        <dt className="text-[11px] font-semibold uppercase tracking-[0.16em] text-faint">
+                          {row.label}
+                        </dt>
+                        <dd className={`mt-1 leading-6 ${value.startsWith("Not found") ? "italic text-faint" : "text-ink"}`}>
+                          {value}
+                        </dd>
+                      </div>
                     );
                   })}
-                </tr>
-              ))}
-              {teardown.competitors.some((c) => c.note) && (
-                <tr className="border-t border-black/[0.07]">
-                  <th className="py-4 pr-4 align-top text-xs font-semibold uppercase tracking-[0.12em] text-black/45">
-                    Notes
-                  </th>
+                </dl>
+                {c.note && <p className="mt-3 text-xs leading-5 text-faint">{c.note}</p>}
+              </div>
+            ))}
+          </div>
+
+          {/* Larger screens: side-by-side table */}
+          <div className="hidden overflow-x-auto md:block">
+            <table className="w-full min-w-[600px] border-collapse text-left text-sm">
+              <thead>
+                <tr className="border-b border-ink">
+                  <th className="w-36 pb-4 pr-4" />
                   {teardown.competitors.map((c) => (
-                    <td key={c.name} className="py-4 pr-4 align-top text-xs leading-5 text-black/45">
-                      {c.note}
-                    </td>
+                    <th key={c.name} className="pb-4 pr-6 align-bottom font-normal">
+                      <span className="block font-serif text-2xl font-semibold leading-tight text-ink">{c.name}</span>
+                      {c.website ? (
+                        <a
+                          href={`https://${c.website}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-xs text-faint underline decoration-rule underline-offset-4 hover:text-ink"
+                        >
+                          {c.website}
+                        </a>
+                      ) : (
+                        <span className="text-xs text-faint">Website not found</span>
+                      )}
+                    </th>
                   ))}
                 </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
+              </thead>
+              <tbody>
+                {TEARDOWN_ROWS.map((row) => (
+                  <tr key={row.key} className="border-b border-rule-soft">
+                    <th className="py-4 pr-4 align-top text-[11px] font-semibold uppercase tracking-[0.16em] text-faint">
+                      {row.label}
+                    </th>
+                    {teardown.competitors.map((c) => {
+                      const value = String(c[row.key]);
+                      const missing = value.startsWith("Not found");
+                      return (
+                        <td
+                          key={c.name}
+                          className={`py-4 pr-6 align-top leading-6 ${missing ? "italic text-faint" : "text-ink"}`}
+                        >
+                          {value}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+                {teardown.competitors.some((c) => c.note) && (
+                  <tr className="border-b border-rule-soft">
+                    <th className="py-4 pr-4 align-top text-[11px] font-semibold uppercase tracking-[0.16em] text-faint">
+                      Notes
+                    </th>
+                    {teardown.competitors.map((c) => (
+                      <td key={c.name} className="py-4 pr-6 align-top text-xs leading-5 text-quiet">
+                        {c.note}
+                      </td>
+                    ))}
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </MemoSection>
 
-      <div className="grid gap-6 md:grid-cols-2">
-        <ReportSection title="Openings you can use" items={teardown.gaps} />
-        <ReportSection title="Recommendations" items={teardown.recommendations} />
-      </div>
+        {teardown.gaps.length > 0 && (
+          <MemoSection title="Openings you can use">
+            <Ledger items={teardown.gaps} />
+          </MemoSection>
+        )}
 
-      {teardown.sources.length > 0 && (
-        <div className="rounded-3xl border border-black/10 bg-white p-7">
-          <p className="mb-5 text-xs font-semibold uppercase tracking-[0.18em] text-black/40">
-            Pages read
-          </p>
-          <ol className="space-y-3">
-            {teardown.sources.map((source, index) => (
-              <li key={`${source}-${index}`} className="flex gap-3 text-sm leading-6">
-                <span className="shrink-0 font-semibold text-black/50">[{index + 1}]</span>
-                <a
-                  href={source}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="min-w-0 break-all text-black/60 underline decoration-black/20 underline-offset-4 hover:text-black"
-                >
-                  {source}
-                </a>
-              </li>
-            ))}
-          </ol>
-        </div>
-      )}
+        {teardown.recommendations.length > 0 && (
+          <MemoSection title="Recommendations">
+            <Ledger items={teardown.recommendations} />
+          </MemoSection>
+        )}
 
-      <DeliverablePanel
-        source={{
-          question: `Competitor teardown: ${teardown.competitors.map((c) => c.name).join(" vs ")}`,
-          summary: teardown.summary,
-          key_findings: teardown.competitors.map(
-            (c) =>
-              `${c.name}: sells ${c.offer} Pricing: ${c.pricing}. Target customer: ${c.target_customer}. ` +
-              `Main message: ${c.positioning} Channels: ${c.channels}.`,
-          ),
-          opportunities: teardown.gaps,
-          recommendations: teardown.recommendations,
-        }}
-        profile={profile}
-      />
+        <DeliverablePanel
+          source={{
+            question: `Competitor teardown: ${teardown.competitors.map((c) => c.name).join(" vs ")}`,
+            summary: teardown.summary,
+            key_findings: teardown.competitors.map(
+              (c) =>
+                `${c.name}: sells ${c.offer} Pricing: ${c.pricing}. Target customer: ${c.target_customer}. ` +
+                `Main message: ${c.positioning} Channels: ${c.channels}.`,
+            ),
+            opportunities: teardown.gaps,
+            recommendations: teardown.recommendations,
+          }}
+          profile={profile}
+        />
 
-      <button
-        onClick={onReset}
-        className="rounded-full border border-black/10 bg-white px-6 py-3 text-sm font-semibold transition hover:border-black/30"
-      >
+        <SourceList title="Pages read" sources={teardown.sources} />
+      </Memorandum>
+
+      <button type="button" onClick={onReset} className="btn-secondary mt-8">
         Start a new teardown
       </button>
     </section>
@@ -1004,57 +1292,48 @@ function DeliverablePanel({
   }
 
   return (
-    <div className="rounded-3xl border border-black/10 bg-white p-7">
-      <p className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-black/40">
-        Turn this into
-      </p>
-      <p className="mb-5 text-sm text-black/50">
-        Built only from this report{profile ? " and your business profile" : ""}. No new searches.
-      </p>
-      <div className="flex flex-wrap gap-3">
-        {DELIVERABLE_BUTTONS.map(([kind, label]) => (
-          <button
-            key={kind}
-            type="button"
-            onClick={() => create(kind)}
-            disabled={working !== null}
-            className={`rounded-full px-5 py-2.5 text-sm font-semibold transition disabled:cursor-not-allowed ${
-              result?.kind === kind
-                ? "bg-black text-white"
-                : "border border-black/10 bg-white hover:border-black/30 disabled:opacity-50"
-            }`}
-          >
-            {working === kind ? "Writing..." : label}
-          </button>
-        ))}
+    <div className="mt-14 border-t border-ink pt-7">
+      <div className="flex flex-wrap items-center justify-between gap-5">
+        <div>
+          <p className="font-serif text-[26px] italic leading-tight">Turn this memorandum into —</p>
+          <p className="mt-1.5 text-sm text-faint">
+            Built only from this report{profile ? " and your business profile" : ""}. No new searches.
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-3">
+          {DELIVERABLE_BUTTONS.map(([kind, label]) => (
+            <button
+              key={kind}
+              type="button"
+              onClick={() => create(kind)}
+              disabled={working !== null}
+              aria-pressed={result?.kind === kind}
+              className={result?.kind === kind ? "btn-primary min-h-12 px-6" : "btn-secondary"}
+            >
+              {working === kind ? "Writing…" : label}
+            </button>
+          ))}
+        </div>
       </div>
 
-      {error && (
-        <div className="mt-5 rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
-          {error}
-        </div>
-      )}
+      {error && <ErrorNote message={error} />}
 
       {result && working === null && (
-        <div className="mt-7 border-t border-black/[0.07] pt-6">
-          <div className="mb-5 flex items-center justify-between gap-4">
-            <h3 className="text-lg font-semibold tracking-tight">{result.title}</h3>
-            <button
-              type="button"
-              onClick={copy}
-              className="shrink-0 rounded-full border border-black/10 px-4 py-2 text-xs font-semibold transition hover:border-black/30"
-            >
+        <div className="mt-8 border border-rule bg-page/60 p-6 md:p-10">
+          <div className="mb-6 flex flex-wrap items-baseline justify-between gap-4 border-b border-rule pb-5">
+            <h3 className="font-serif text-[30px] font-medium leading-tight">{result.title}</h3>
+            <button type="button" onClick={copy} className="link-quiet text-xs uppercase tracking-[0.18em]">
               {copied ? "Copied" : "Copy all"}
             </button>
           </div>
-          <div className="space-y-6">
+          <div className="space-y-7">
             {result.sections.map((section, index) => (
               <div key={`${section.heading}-${index}`}>
-                <p className="mb-2 text-sm font-semibold text-black/80">{section.heading}</p>
-                <ul className="space-y-2 text-sm leading-6 text-black/70">
+                <p className="eyebrow mb-3 text-[11px] font-semibold text-gold-deep">{section.heading}</p>
+                <ul className="space-y-2.5 text-[15px] leading-[1.65] text-ink">
                   {section.items.map((item, i) => (
                     <li key={i} className="flex gap-3">
-                      <span className="mt-2.5 h-1 w-1 shrink-0 rounded-full bg-black/40" />
+                      <span aria-hidden="true" className="mt-[11px] h-px w-3 shrink-0 bg-gold" />
                       <span>{item}</span>
                     </li>
                   ))}

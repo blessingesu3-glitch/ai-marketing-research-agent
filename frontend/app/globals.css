@@ -1,26 +1,160 @@
 @import "tailwindcss";
 
+/* Gold & brown editorial palette */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --ink: #2a1c13; /* espresso: text, masthead, primary buttons */
+  --page: #f7f1e6; /* cream page */
+  --paper: #fffdf8; /* memorandum paper */
+  --rule: #d8c8a8; /* hairlines */
+  --rule-soft: #e6dac3;
+  --gold: #b8913a; /* rules and accents only, never body text */
+  --gold-text: #8a6514; /* gold that is readable as text */
+  --gold-deep: #7a5a12;
+  --muted: #4e3b2c;
+  --faint: #7d6a58;
+  --quiet: #6b5a4a;
+  --tan: #cdbfa8;
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  --color-ink: var(--ink);
+  --color-page: var(--page);
+  --color-paper: var(--paper);
+  --color-rule: var(--rule);
+  --color-rule-soft: var(--rule-soft);
+  --color-gold: var(--gold);
+  --color-gold-text: var(--gold-text);
+  --color-gold-deep: var(--gold-deep);
+  --color-muted: var(--muted);
+  --color-faint: var(--faint);
+  --color-quiet: var(--quiet);
+  --color-tan: var(--tan);
+  --font-sans: var(--font-hanken), system-ui, sans-serif;
+  --font-serif: var(--font-cormorant), Georgia, serif;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--page);
+  color: var(--ink);
+  font-family: var(--font-hanken), system-ui, sans-serif;
+}
+
+::selection {
+  background: #e9d9b0;
+  color: var(--ink);
+}
+
+@layer components {
+  /* Small capitals label */
+  .eyebrow {
+    font-size: 12px;
+    letter-spacing: 0.26em;
+    text-transform: uppercase;
+  }
+
+  .btn-primary {
+    display: inline-flex;
+    min-height: 52px;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    border-radius: 2px;
+    background: var(--ink);
+    padding: 0 32px;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: var(--page);
+    transition: background-color 150ms;
+  }
+  .btn-primary:hover:not(:disabled) {
+    background: #3f2a1d;
+  }
+  .btn-primary:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
+  }
+
+  .btn-secondary {
+    display: inline-flex;
+    min-height: 48px;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--ink);
+    border-radius: 2px;
+    background: transparent;
+    padding: 0 24px;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--ink);
+    transition: background-color 150ms, color 150ms;
+  }
+  .btn-secondary:hover:not(:disabled) {
+    background: var(--ink);
+    color: var(--page);
+  }
+  .btn-secondary:disabled {
+    cursor: not-allowed;
+    opacity: 0.45;
+  }
+
+  /* Underlined form field */
+  .field {
+    display: block;
+    width: 100%;
+    border: 0;
+    border-bottom: 1px solid var(--rule);
+    background: transparent;
+    padding: 10px 0;
+    font-size: 15px;
+    color: var(--ink);
+    outline: none;
+    transition: border-color 150ms;
+  }
+  .field::placeholder {
+    color: #9c8a76;
+  }
+  .field:focus {
+    border-bottom-color: var(--ink);
+  }
+
+  .link-quiet {
+    border-bottom: 1px solid var(--gold);
+    padding-bottom: 1px;
+    color: var(--gold-deep);
+    transition: color 150ms;
+  }
+  .link-quiet:hover {
+    color: var(--ink);
+  }
+}
+
+:focus-visible {
+  outline: 2px solid var(--gold-text);
+  outline-offset: 3px;
+}
+
+@keyframes progress-slide {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(250%);
+  }
+}
+
+.progress-bar {
+  animation: progress-slide 1.8s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .progress-bar {
+    animation: none;
+    transform: none;
+    width: 100%;
+    opacity: 0.5;
+  }
 }
