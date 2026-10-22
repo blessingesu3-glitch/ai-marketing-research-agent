@@ -131,6 +131,156 @@ function hasProfileData(profile: Profile | null): profile is Profile {
   return !!profile && Object.values(profile).some((value) => value.trim() !== "");
 }
 
+/* ---------- Past research: saved in this browser only ---------- */
+
+type HistoryEntry = {
+  id: string;
+  kind: Mode;
+  savedAt: number;
+  tailoredTo: string;
+  profile: Profile | null;
+  report?: Report;
+  teardown?: Teardown;
+  deliverables: Partial<Record<DeliverableKind, Deliverable>>;
+};
+
+type SaveResult = "saved" | "trimmed" | "memory";
+
+const HISTORY_STORAGE_KEY = "marketing-agent-history";
+const HISTORY_CHANGED_EVENT = "marketing-agent-history-changed";
+const MAX_HISTORY = 50;
+
+// Used only when the browser blocks storage: kept until the page is closed.
+let memoryHistoryText: string | null = null;
+
+function subscribeToHistory(onChange: () => void) {
+  window.addEventListener("storage", onChange);
+  window.addEventListener(HISTORY_CHANGED_EVENT, onChange);
+  return () => {
+    window.removeEventListener("storage", onChange);
+    window.removeEventListener(HISTORY_CHANGED_EVENT, onChange);
+  };
+}
+
+function readHistoryText(): string | null {
+  if (memoryHistoryText !== null) {
+    return memoryHistoryText;
+  }
+  try {
+    return window.localStorage.getItem(HISTORY_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+const isStringList = (value: unknown) =>
+  Array.isArray(value) && value.every((item) => typeof item === "string");
+
+function isReport(value: unknown): value is Report {
+  const r = value as Report;
+  return (
+    !!r && typeof r.question === "string" && typeof r.summary === "string" &&
+    isStringList(r.key_findings) && isStringList(r.opportunities) &&
+    isStringList(r.recommendations) && isStringList(r.sources)
+  );
+}
+
+function isTeardown(value: unknown): value is Teardown {
+  const t = value as Teardown;
+  return (
+    !!t && typeof t.summary === "string" && Array.isArray(t.competitors) &&
+    t.competitors.every((c) => !!c && typeof c.name === "string") &&
+    isStringList(t.gaps) && isStringList(t.recommendations) && isStringList(t.sources)
+  );
+}
+
+/** Read saved entries, skipping anything damaged rather than crashing the page. */
+function parseHistory(raw: string | null): HistoryEntry[] {
+  if (!raw) {
+    return [];
+  }
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed.filter(
+      (e): e is HistoryEntry =>
+        !!e && typeof e.id === "string" && typeof e.savedAt === "number" &&
+        ((e.kind === "research" && isReport(e.report)) ||
+          (e.kind === "teardown" && isTeardown(e.teardown))),
+    ).map((e) => ({
+      ...e,
+      tailoredTo: typeof e.tailoredTo === "string" ? e.tailoredTo : "",
+      profile: e.profile ?? null,
+      deliverables: e.deliverables && typeof e.deliverables === "object" ? e.deliverables : {},
+    }));
+  } catch {
+    return [];
+  }
+}
+
+/** Save the list (newest first). If storage is full, drop the oldest entries until it fits. */
+function writeHistory(entries: HistoryEntry[]): SaveResult {
+  let list = entries.slice(0, MAX_HISTORY);
+  let result: SaveResult = "saved";
+  while (list.length > 0) {
+    try {
+      window.localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(list));
+      memoryHistoryText = null;
+      window.dispatchEvent(new Event(HISTORY_CHANGED_EVENT));
+      return result;
+    } catch {
+      list = list.slice(0, -1);
+      result = "trimmed";
+    }
+  }
+  if (entries.length === 0) {
+    try {
+      window.localStorage.removeItem(HISTORY_STORAGE_KEY);
+      memoryHistoryText = null;
+    } catch {
+      memoryHistoryText = "[]";
+    }
+    window.dispatchEvent(new Event(HISTORY_CHANGED_EVENT));
+    return "saved";
+  }
+  // Storage is blocked (e.g. some private windows): keep it for this visit only.
+  memoryHistoryText = JSON.stringify(entries.slice(0, MAX_HISTORY));
+  window.dispatchEvent(new Event(HISTORY_CHANGED_EVENT));
+  return "memory";
+}
+
+function newId(): string {
+  try {
+    return crypto.randomUUID();
+  } catch {
+    return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  }
+}
+
+function formatDate(ms: number): string {
+  return new Date(ms).toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" });
+}
+
+function entryTitle(entry: HistoryEntry): string {
+  return entry.kind === "teardown"
+    ? (entry.teardown?.competitors ?? []).map((c) => c.name).join(" vs ") || "Competitor teardown"
+    : entry.report?.question ?? "Research";
+}
+
+/** Open the print dialog so the user can save the memorandum as a PDF. */
+function downloadPdf(title: string) {
+  const previous = document.title;
+  document.title = title.slice(0, 120);
+  const restore = () => {
+    document.title = previous;
+    window.removeEventListener("afterprint", restore);
+  };
+  window.addEventListener("afterprint", restore);
+  window.print();
+}
+
 /** Starter questions that work for any sector. Uses the saved profile where it can. */
 function starterQuestions(profile: Profile | null): { label: string; question: string }[] {
   const lower = (text: string) => (/^[A-Z][a-z]/.test(text) ? text[0].toLowerCase() + text.slice(1) : text);
@@ -160,8 +310,11 @@ function starterQuestions(profile: Profile | null): { label: string; question: s
 
 export default function Home() {
   const [question, setQuestion] = useState("");
-  const [report, setReport] = useState<Report | null>(null);
-  const [reportDate, setReportDate] = useState("");
+  // The report or teardown on screen is always an entry in the saved history.
+  const [openId, setOpenId] = useState<string | null>(null);
+  const [historyNotice, setHistoryNotice] = useState("");
+  const resultRef = useRef<HTMLDivElement>(null);
+  const historyRef = useRef<HTMLElement>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const questionRef = useRef<HTMLTextAreaElement>(null);
@@ -171,7 +324,10 @@ export default function Home() {
   const [mode, setMode] = useState<Mode>("research");
   const [competitorInputs, setCompetitorInputs] = useState<string[]>(["", "", ""]);
   const [focus, setFocus] = useState("");
-  const [teardown, setTeardown] = useState<Teardown | null>(null);
+
+  const historyText = useSyncExternalStore(subscribeToHistory, readHistoryText, () => null);
+  const history = useMemo(() => parseHistory(historyText), [historyText]);
+  const openEntry = history.find((entry) => entry.id === openId) ?? null;
 
   // Business profile: saved in this browser only, used only when the box is ticked.
   const storedProfileText = useSyncExternalStore(
@@ -190,7 +346,6 @@ export default function Home() {
   const [profileOpen, setProfileOpen] = useState(false);
   const [profileNotice, setProfileNotice] = useState("");
   const [useProfile, setUseProfile] = useState(false);
-  const [tailoredTo, setTailoredTo] = useState("");
 
   function toggleProfilePanel() {
     if (!profileOpen) {
@@ -259,11 +414,11 @@ export default function Home() {
 
     setLoading(true);
     setError("");
-    setReport(null);
-    setTeardown(null);
+    setOpenId(null);
+    setHistoryNotice("");
 
+    const runMode = mode;
     const sendProfile = useProfile && hasProfileData(savedProfile);
-    setTailoredTo(sendProfile ? profileName : "");
     const profilePart = sendProfile ? { profile: savedProfile } : {};
 
     try {
@@ -297,13 +452,21 @@ export default function Home() {
       }
 
       const data = await response.json();
-      setReportDate(
-        new Date().toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" }),
-      );
-      if (mode === "teardown") {
-        setTeardown(data);
-      } else {
-        setReport(data);
+      const entry: HistoryEntry = {
+        id: newId(),
+        kind: runMode,
+        savedAt: Date.now(),
+        tailoredTo: sendProfile ? profileName : "",
+        profile: sendProfile ? savedProfile : null,
+        ...(runMode === "teardown" ? { teardown: data as Teardown } : { report: data as Report }),
+        deliverables: {},
+      };
+      const saved = writeHistory([entry, ...parseHistory(readHistoryText())]);
+      setOpenId(entry.id);
+      if (saved === "trimmed") {
+        setHistoryNotice("Your browser storage was full, so your oldest saved research was removed to make room.");
+      } else if (saved === "memory") {
+        setHistoryNotice("Your browser blocked saving, so this report will be gone when you leave the page. Download it as a PDF to keep it.");
       }
     } catch (err) {
       console.error(err);
@@ -320,6 +483,42 @@ export default function Home() {
   function fillCompetitorsFromProfile() {
     const names = splitCompetitors(savedProfile?.competitors ?? "");
     setCompetitorInputs([0, 1, 2].map((i) => names[i] ?? ""));
+  }
+
+  function openSaved(id: string) {
+    setOpenId(id);
+    setHistoryNotice("");
+    window.setTimeout(() => resultRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
+  }
+
+  function deleteSaved(id: string) {
+    writeHistory(parseHistory(readHistoryText()).filter((entry) => entry.id !== id));
+    if (openId === id) {
+      setOpenId(null);
+    }
+  }
+
+  function clearSaved() {
+    if (window.confirm("Delete all saved research from this browser? This cannot be undone.")) {
+      writeHistory([]);
+      setOpenId(null);
+    }
+  }
+
+  function saveDeliverable(id: string, deliverable: Deliverable) {
+    writeHistory(
+      parseHistory(readHistoryText()).map((entry) =>
+        entry.id === id
+          ? { ...entry, deliverables: { ...entry.deliverables, [deliverable.kind]: deliverable } }
+          : entry,
+      ),
+    );
+  }
+
+  function startNew() {
+    setOpenId(null);
+    setHistoryNotice("");
+    deskRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
   function switchMode(next: Mode) {
@@ -354,23 +553,30 @@ export default function Home() {
   }
 
   return (
-    <div className="min-h-screen bg-page text-ink">
+    <div className="min-h-screen bg-page text-ink print:bg-white">
       {/* Masthead */}
-      <div className="bg-ink text-page">
+      <div className="bg-ink text-page print:hidden">
         <header className="mx-auto flex min-h-[72px] max-w-[1180px] flex-wrap items-center justify-between gap-x-8 gap-y-3 px-5 py-4 md:px-10">
           <a href="#top" className="flex items-baseline gap-3.5 text-page no-underline">
             <span className="font-serif text-[22px] font-semibold tracking-[0.01em] md:text-[28px]">
               AI Marketing Research Agent
             </span>
           </a>
-          <nav aria-label="Main" className="flex flex-wrap items-center gap-x-8 gap-y-2 text-xs uppercase tracking-[0.2em]">
-            <a href="#method" className="text-[#D9CBB4] transition hover:text-page">
+          <nav aria-label="Main" className="flex flex-wrap items-center gap-x-6 gap-y-2 text-xs uppercase tracking-[0.16em] sm:gap-x-8 sm:tracking-[0.2em]">
+            <button
+              type="button"
+              onClick={() => historyRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })}
+              className="min-h-11 uppercase tracking-[inherit] text-[#D9CBB4] transition hover:text-page"
+            >
+              Past research{history.length > 0 ? ` (${history.length})` : ""}
+            </button>
+            <a href="#method" className="hidden text-[#D9CBB4] transition hover:text-page sm:inline">
               Method
             </a>
             <button
               type="button"
               onClick={openProfileFromNav}
-              className="min-h-11 border-b border-gold pb-0.5 uppercase tracking-[0.2em] text-page"
+              className="min-h-11 border-b border-gold pb-0.5 uppercase tracking-[inherit] text-page"
             >
               Business profile
             </button>
@@ -378,9 +584,9 @@ export default function Home() {
         </header>
       </div>
 
-      <main id="top" className="mx-auto w-full max-w-[1180px] px-5 pb-24 md:px-10">
+      <main id="top" className="mx-auto w-full max-w-[1180px] px-5 pb-24 md:px-10 print:max-w-none print:p-0">
         {/* Hero: one column, like the original layout */}
-        <section className="border-b border-rule pb-12 pt-14 md:pb-16 md:pt-[88px]">
+        <section className="border-b border-rule pb-12 pt-14 print:hidden md:pb-16 md:pt-[88px]">
           <p className="eyebrow mb-6 text-gold-deep md:mb-7">Marketing research for any business</p>
           <h1 className="font-serif text-[46px] font-medium leading-[1.02] tracking-[-0.02em] sm:text-[60px] md:text-[80px]">
             Know your market.
@@ -397,7 +603,7 @@ export default function Home() {
         </section>
 
         {/* The writing surface */}
-        <section ref={deskRef} aria-label="Start your research" className="scroll-mt-6 pb-6 pt-12 md:pt-14">
+        <section ref={deskRef} aria-label="Start your research" className="scroll-mt-6 pb-6 pt-12 print:hidden md:pt-14">
           <div className="flex flex-wrap items-baseline justify-between gap-4">
             <div role="tablist" aria-label="What do you want to do?" className="flex flex-wrap gap-x-6 gap-y-2 sm:gap-x-9">
               {(
@@ -627,7 +833,7 @@ export default function Home() {
         {/* Or begin with */}
         <section
           aria-label="Or begin with"
-          className="mt-4 flex flex-wrap items-stretch border-y border-rule"
+          className="mt-4 flex flex-wrap items-stretch border-y border-rule print:hidden"
         >
           <p className="w-full py-4 font-serif text-xl italic text-gold-deep md:w-auto md:flex-none md:py-[22px] md:pr-7">
             Or begin with
@@ -645,7 +851,7 @@ export default function Home() {
         </section>
 
         {loading && (
-          <section aria-live="polite" className="mt-16 border border-rule bg-paper p-8 md:p-12">
+          <section aria-live="polite" className="mt-16 border border-rule bg-paper p-8 print:hidden md:p-12">
             <p className="eyebrow font-semibold text-ink">Research in progress</p>
             <p className="mt-4 font-serif text-[28px] italic leading-snug text-ink md:text-[34px]">
               {mode === "teardown"
@@ -659,82 +865,93 @@ export default function Home() {
           </section>
         )}
 
-        {report && !loading && (
-          <section aria-label="Research memorandum" className="mt-16">
-            <Memorandum
-              kind="Research memorandum"
-              title={report.question}
-              preparedFor={tailoredTo}
-              date={reportDate}
-              sourceCount={report.sources.length}
-            >
-              <EvidenceLedger findings={report.key_findings} />
+        {openEntry && !loading && (
+          <div ref={resultRef} className="mt-16 scroll-mt-6 print:mt-0">
+            <MemoToolbar
+              entry={openEntry}
+              notice={historyNotice}
+              onStartNew={startNew}
+            />
 
-              <MemoSection title="Summary">
-                <Summary text={report.summary} />
-              </MemoSection>
+            {openEntry.report && (
+              <section aria-label="Research memorandum">
+                <Memorandum
+                  kind="Research memorandum"
+                  title={openEntry.report.question}
+                  preparedFor={openEntry.tailoredTo}
+                  date={formatDate(openEntry.savedAt)}
+                  sourceCount={openEntry.report.sources.length}
+                >
+                  <EvidenceLedger findings={openEntry.report.key_findings} />
 
-              <MemoSection title="Findings">
-                <Ledger items={report.key_findings} />
-              </MemoSection>
+                  <MemoSection title="Summary">
+                    <Summary text={openEntry.report.summary} />
+                  </MemoSection>
 
-              {report.opportunities.length > 0 && (
-                <MemoSection title="Opportunities">
-                  <Ledger items={report.opportunities} />
-                </MemoSection>
-              )}
+                  <MemoSection title="Findings">
+                    <Ledger items={openEntry.report.key_findings} />
+                  </MemoSection>
 
-              {report.recommendations.length > 0 && (
-                <MemoSection title="Recommendations">
-                  <Ledger items={report.recommendations} />
-                </MemoSection>
-              )}
+                  {openEntry.report.opportunities.length > 0 && (
+                    <MemoSection title="Opportunities">
+                      <Ledger items={openEntry.report.opportunities} />
+                    </MemoSection>
+                  )}
 
-              <DeliverablePanel
-                source={{
-                  question: report.question,
-                  summary: report.summary,
-                  key_findings: report.key_findings,
-                  opportunities: report.opportunities,
-                  recommendations: report.recommendations,
-                }}
-                profile={tailoredTo ? savedProfile : null}
+                  {openEntry.report.recommendations.length > 0 && (
+                    <MemoSection title="Recommendations">
+                      <Ledger items={openEntry.report.recommendations} />
+                    </MemoSection>
+                  )}
+
+                  <DeliverablePanel
+                    key={openEntry.id}
+                    source={{
+                      question: openEntry.report.question,
+                      summary: openEntry.report.summary,
+                      key_findings: openEntry.report.key_findings,
+                      opportunities: openEntry.report.opportunities,
+                      recommendations: openEntry.report.recommendations,
+                    }}
+                    profile={openEntry.profile}
+                    saved={openEntry.deliverables}
+                    onCreated={(deliverable) => saveDeliverable(openEntry.id, deliverable)}
+                  />
+
+                  <SourceList title="Sources" sources={openEntry.report.sources} />
+                </Memorandum>
+              </section>
+            )}
+
+            {openEntry.teardown && (
+              <TeardownView
+                key={openEntry.id}
+                teardown={openEntry.teardown}
+                tailoredTo={openEntry.tailoredTo}
+                date={formatDate(openEntry.savedAt)}
+                profile={openEntry.profile}
+                saved={openEntry.deliverables}
+                onCreated={(deliverable) => saveDeliverable(openEntry.id, deliverable)}
               />
+            )}
 
-              <SourceList title="Sources" sources={report.sources} />
-            </Memorandum>
-
-            <button
-              type="button"
-              onClick={() => {
-                setReport(null);
-                setQuestion("");
-                deskRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-              }}
-              className="btn-secondary mt-8"
-            >
-              Start new research
+            <button type="button" onClick={startNew} className="btn-secondary mt-8 print:hidden">
+              {openEntry.kind === "teardown" ? "Start a new teardown" : "Start new research"}
             </button>
-          </section>
+          </div>
         )}
 
-        {teardown && !loading && (
-          <TeardownView
-            teardown={teardown}
-            tailoredTo={tailoredTo}
-            date={reportDate}
-            profile={tailoredTo ? savedProfile : null}
-            onReset={() => {
-              setTeardown(null);
-              setCompetitorInputs(["", "", ""]);
-              setFocus("");
-              deskRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-            }}
-          />
-        )}
+        <HistoryList
+          sectionRef={historyRef}
+          entries={history}
+          openId={openEntry ? openEntry.id : null}
+          onOpen={openSaved}
+          onDelete={deleteSaved}
+          onClear={clearSaved}
+        />
 
         {/* Method */}
-        <section id="method" aria-label="Method" className="mt-24 flex scroll-mt-6 flex-wrap gap-x-16 gap-y-10">
+        <section id="method" aria-label="Method" className="mt-24 flex scroll-mt-6 flex-wrap gap-x-16 gap-y-10 print:hidden">
           <div className="flex-[1_1_260px]">
             <p className="eyebrow mb-4 text-gold-deep">The method</p>
             <h2 className="font-serif text-[40px] font-medium leading-[1.05] md:text-[44px]">
@@ -756,7 +973,7 @@ export default function Home() {
           </div>
         </section>
 
-        <footer className="mt-20 flex flex-wrap justify-between gap-x-8 gap-y-3 border-t border-rule pt-6 text-xs uppercase tracking-[0.12em] text-faint">
+        <footer className="mt-20 flex flex-wrap print:hidden justify-between gap-x-8 gap-y-3 border-t border-rule pt-6 text-xs uppercase tracking-[0.12em] text-faint">
           <span className="font-serif text-xl normal-case tracking-[0.01em] text-ink">
             AI Marketing Research Agent
           </span>
@@ -795,7 +1012,7 @@ function Memorandum({
   children: React.ReactNode;
 }) {
   return (
-    <article className="border border-rule bg-paper px-5 pb-10 pt-8 sm:px-8 md:px-[72px] md:pb-14 md:pt-16">
+    <article className="border border-rule bg-paper px-5 pb-10 pt-8 sm:px-8 md:px-[72px] md:pb-14 md:pt-16 print:border-0 print:bg-white print:p-0">
       <header className="flex flex-wrap justify-between gap-x-10 gap-y-4 border-b border-ink pb-7">
         <p className="eyebrow font-semibold text-ink">{kind}</p>
         <dl className="flex flex-wrap gap-x-8 gap-y-1.5 text-[13px] text-muted">
@@ -1039,16 +1256,18 @@ function TeardownView({
   tailoredTo,
   date,
   profile,
-  onReset,
+  saved,
+  onCreated,
 }: {
   teardown: Teardown;
   tailoredTo: string;
   date: string;
   profile: Profile | null;
-  onReset: () => void;
+  saved: Partial<Record<DeliverableKind, Deliverable>>;
+  onCreated: (deliverable: Deliverable) => void;
 }) {
   return (
-    <section aria-label="Competitor teardown" className="mt-16">
+    <section aria-label="Competitor teardown">
       <Memorandum
         kind="Competitor teardown"
         title={teardown.competitors.map((c) => c.name).join(" vs ")}
@@ -1175,14 +1394,12 @@ function TeardownView({
             recommendations: teardown.recommendations,
           }}
           profile={profile}
+          saved={saved}
+          onCreated={onCreated}
         />
 
         <SourceList title="Pages read" sources={teardown.sources} />
       </Memorandum>
-
-      <button type="button" onClick={onReset} className="btn-secondary mt-8">
-        Start a new teardown
-      </button>
     </section>
   );
 }
@@ -1213,17 +1430,32 @@ const DELIVERABLE_BUTTONS: [DeliverableKind, string][] = [
 function DeliverablePanel({
   source,
   profile,
+  saved,
+  onCreated,
 }: {
   source: SourceReport;
   profile: Profile | null;
+  saved: Partial<Record<DeliverableKind, Deliverable>>;
+  onCreated: (deliverable: Deliverable) => void;
 }) {
   const [working, setWorking] = useState<DeliverableKind | null>(null);
-  const [result, setResult] = useState<Deliverable | null>(null);
+  // Show a saved deliverable straight away if this report already has one.
+  const [result, setResult] = useState<Deliverable | null>(
+    () => DELIVERABLE_BUTTONS.map(([kind]) => saved[kind]).find(Boolean) ?? null,
+  );
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
 
   async function create(kind: DeliverableKind) {
     if (working) {
+      return;
+    }
+    const existing = saved[kind];
+    if (existing) {
+      // Already written for this report: show the saved copy, no new request.
+      setResult(existing);
+      setError("");
+      setCopied(false);
       return;
     }
     setWorking(kind);
@@ -1254,7 +1486,9 @@ function DeliverablePanel({
         }
         throw new RequestError(response.status === 429 || response.status === 422 ? detail : "");
       }
-      setResult(await response.json());
+      const created: Deliverable = await response.json();
+      setResult(created);
+      onCreated(created);
     } catch (err) {
       console.error(err);
       setError(
@@ -1280,8 +1514,8 @@ function DeliverablePanel({
   }
 
   return (
-    <div className="mt-14 border-t border-ink pt-7">
-      <div className="flex flex-wrap items-center justify-between gap-5">
+    <div className={`mt-14 border-t border-ink pt-7 ${result ? "" : "print:hidden"}`}>
+      <div className="flex flex-wrap items-center justify-between gap-5 print:hidden">
         <div>
           <p className="font-serif text-[26px] italic leading-tight">Turn this memorandum into —</p>
           <p className="mt-1.5 text-sm text-faint">
@@ -1299,6 +1533,9 @@ function DeliverablePanel({
               className={result?.kind === kind ? "btn-primary min-h-12 px-6" : "btn-secondary"}
             >
               {working === kind ? "Writing…" : label}
+              {saved[kind] && working !== kind && (
+                <span className="sr-only"> (saved)</span>
+              )}
             </button>
           ))}
         </div>
@@ -1307,10 +1544,10 @@ function DeliverablePanel({
       {error && <ErrorNote message={error} />}
 
       {result && working === null && (
-        <div className="mt-8 border border-rule bg-page/60 p-6 md:p-10">
+        <div className="mt-8 border border-rule bg-page/60 p-6 print:mt-0 print:border-0 print:p-0 md:p-10">
           <div className="mb-6 flex flex-wrap items-baseline justify-between gap-4 border-b border-rule pb-5">
             <h3 className="font-serif text-[30px] font-medium leading-tight">{result.title}</h3>
-            <button type="button" onClick={copy} className="link-quiet text-xs uppercase tracking-[0.18em]">
+            <button type="button" onClick={copy} className="link-quiet text-xs uppercase tracking-[0.18em] print:hidden">
               {copied ? "Copied" : "Copy all"}
             </button>
           </div>
@@ -1332,5 +1569,189 @@ function DeliverablePanel({
         </div>
       )}
     </div>
+  );
+}
+
+function MemoToolbar({
+  entry,
+  notice,
+  onStartNew,
+}: {
+  entry: HistoryEntry;
+  notice: string;
+  onStartNew: () => void;
+}) {
+  const kindLabel = entry.kind === "teardown" ? "Competitor teardown" : "Research memorandum";
+  return (
+    <div className="mb-4 print:hidden">
+      <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-3">
+        <p className="text-sm text-faint">
+          Saved in this browser on {formatDate(entry.savedAt)}. Reopening it costs nothing.
+        </p>
+        <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
+          <button
+            type="button"
+            onClick={() => downloadPdf(`${kindLabel} – ${entryTitle(entry)}`)}
+            className="link-quiet min-h-11 text-xs uppercase tracking-[0.18em]"
+          >
+            Download PDF
+          </button>
+          <button
+            type="button"
+            onClick={onStartNew}
+            className="min-h-11 text-xs uppercase tracking-[0.18em] text-faint transition hover:text-ink"
+          >
+            Close
+          </button>
+        </div>
+      </div>
+      {notice && <ErrorNote message={notice} />}
+    </div>
+  );
+}
+
+function HistoryList({
+  sectionRef,
+  entries,
+  openId,
+  onOpen,
+  onDelete,
+  onClear,
+}: {
+  sectionRef: React.RefObject<HTMLElement | null>;
+  entries: HistoryEntry[];
+  openId: string | null;
+  onOpen: (id: string) => void;
+  onDelete: (id: string) => void;
+  onClear: () => void;
+}) {
+  const [filter, setFilter] = useState("");
+  const [showAll, setShowAll] = useState(false);
+  const term = filter.trim().toLowerCase();
+  const matches = term
+    ? entries.filter((e) =>
+        `${entryTitle(e)} ${e.tailoredTo}`.toLowerCase().includes(term),
+      )
+    : entries;
+  const shown = showAll || term ? matches : matches.slice(0, 8);
+
+  return (
+    <section
+      ref={sectionRef}
+      aria-label="Past research"
+      className="mt-24 scroll-mt-6 print:hidden"
+    >
+      <div className="flex flex-wrap items-end justify-between gap-x-10 gap-y-4">
+        <div>
+          <p className="eyebrow mb-4 text-gold-deep">Past research</p>
+          <h2 className="font-serif text-[36px] font-medium leading-[1.05] md:text-[40px]">
+            Everything you have asked
+          </h2>
+          <p className="mt-3 max-w-xl text-[15px] leading-[1.65] text-muted">
+            Saved in this browser only, up to your latest {MAX_HISTORY}. Open one to read it again,
+            download it or make a brief from it, with no new searches.
+          </p>
+        </div>
+        {entries.length > 5 && (
+          <label className="w-full max-w-xs">
+            <span className="sr-only">Search past research</span>
+            <input
+              type="search"
+              value={filter}
+              onChange={(event) => setFilter(event.target.value)}
+              placeholder="Search past research"
+              className="field"
+            />
+          </label>
+        )}
+      </div>
+
+      {entries.length === 0 ? (
+        <p className="mt-8 border-y border-rule py-6 text-[15px] text-faint">
+          Nothing yet. Your questions and competitor teardowns will appear here after you run them.
+        </p>
+      ) : (
+        <>
+          <ol className="mt-8 border-t border-ink">
+            {shown.map((entry) => {
+              const made = Object.keys(entry.deliverables).length;
+              const isOpen = entry.id === openId;
+              return (
+                <li
+                  key={entry.id}
+                  className={`flex flex-wrap items-center gap-x-6 gap-y-2 border-b border-rule-soft py-4 ${
+                    isOpen ? "bg-paper" : ""
+                  }`}
+                >
+                  <span className="w-[120px] shrink-0 text-xs text-faint">
+                    {formatDate(entry.savedAt)}
+                  </span>
+                  <span className="w-[110px] shrink-0 text-[11px] font-semibold uppercase tracking-[0.16em] text-gold-deep">
+                    {entry.kind === "teardown" ? "Teardown" : "Research"}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => onOpen(entry.id)}
+                    className="min-h-11 min-w-0 flex-[1_1_260px] text-left font-serif text-lg leading-snug text-ink transition hover:text-gold-deep"
+                  >
+                    {entryTitle(entry)}
+                    {(entry.tailoredTo || made > 0) && (
+                      <span className="mt-0.5 block font-sans text-xs text-faint">
+                        {[
+                          entry.tailoredTo && `For ${entry.tailoredTo}`,
+                          made > 0 && `${made} saved ${made === 1 ? "brief or plan" : "briefs or plans"}`,
+                        ]
+                          .filter(Boolean)
+                          .join(" · ")}
+                      </span>
+                    )}
+                  </button>
+                  <span className="flex shrink-0 gap-5">
+                    <button
+                      type="button"
+                      onClick={() => onOpen(entry.id)}
+                      className="link-quiet min-h-11 text-xs uppercase tracking-[0.16em]"
+                    >
+                      {isOpen ? "Open now" : "Open"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onDelete(entry.id)}
+                      aria-label={`Delete ${entryTitle(entry)}`}
+                      className="min-h-11 text-xs uppercase tracking-[0.16em] text-faint transition hover:text-[#7a2416]"
+                    >
+                      Delete
+                    </button>
+                  </span>
+                </li>
+              );
+            })}
+          </ol>
+          {term && matches.length === 0 && (
+            <p className="py-5 text-sm text-faint">No saved research matches &ldquo;{filter}&rdquo;.</p>
+          )}
+          <div className="mt-5 flex flex-wrap items-center justify-between gap-4">
+            {!term && matches.length > 8 ? (
+              <button
+                type="button"
+                onClick={() => setShowAll(!showAll)}
+                className="link-quiet min-h-11 text-xs uppercase tracking-[0.16em]"
+              >
+                {showAll ? "Show fewer" : `Show all ${matches.length}`}
+              </button>
+            ) : (
+              <span />
+            )}
+            <button
+              type="button"
+              onClick={onClear}
+              className="min-h-11 text-xs uppercase tracking-[0.16em] text-faint transition hover:text-[#7a2416]"
+            >
+              Clear all
+            </button>
+          </div>
+        </>
+      )}
+    </section>
   );
 }

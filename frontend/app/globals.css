@@ -158,3 +158,26 @@ body {
     opacity: 0.5;
   }
 }
+
+/* Download PDF = the browser's print dialog. Only the memorandum is printed. */
+@page {
+  margin: 16mm 14mm;
+}
+
+@media print {
+  body {
+    background: #fff;
+  }
+  li,
+  tr,
+  dl > div {
+    break-inside: avoid;
+  }
+  h2,
+  h3 {
+    break-after: avoid;
+  }
+  a {
+    text-decoration: none;
+  }
+}
